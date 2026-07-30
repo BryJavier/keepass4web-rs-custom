@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go + Rust Backend Implementer"
+  short_description: "Build secure Go, Supabase, and Rust backends"
+  default_prompt: "Use $implement-go-rust-backend to implement the approved backend completely and verify it against the project architecture."

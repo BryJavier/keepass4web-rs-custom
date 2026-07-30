@@ -1,0 +1,4 @@
+interface:
+  display_name: "HTMX Frontend Implementer"
+  short_description: "Build polished mobile-first HTMX interfaces"
+  default_prompt: "Use $implement-htmx-frontend to implement the approved frontend completely and verify it against the project architecture."

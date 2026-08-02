@@ -1,73 +1,123 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"crypto/rand"
+	"encoding/hex"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
-	"strings"
+	"time"
+
+	"github.com/lixmal/keepass4web-rs/internal/config"
+	"github.com/lixmal/keepass4web-rs/internal/observability"
 )
 
-type Config struct {
-	Environment       string
-	ListenAddr        string
-	SessionSecret     string
-	SupabaseURL       string
-	SupabaseAnonKey   string
-	SupabaseJWTIssuer string
-	RustServiceURL    string
-	RustServiceToken  string
-}
-
-type configField struct {
-	key string
-	set func(*Config, string)
-}
-
-var requiredConfigFields = []configField{
-	{"APP_ENV", func(config *Config, value string) { config.Environment = value }},
-	{"APP_LISTEN_ADDR", func(config *Config, value string) { config.ListenAddr = value }},
-	{"APP_SESSION_SECRET", func(config *Config, value string) { config.SessionSecret = value }},
-	{"SUPABASE_URL", func(config *Config, value string) { config.SupabaseURL = value }},
-	{"SUPABASE_ANON_KEY", func(config *Config, value string) { config.SupabaseAnonKey = value }},
-	{"SUPABASE_JWT_ISSUER", func(config *Config, value string) { config.SupabaseJWTIssuer = value }},
-	{"RUST_SERVICE_URL", func(config *Config, value string) { config.RustServiceURL = value }},
-	{"RUST_SERVICE_TOKEN", func(config *Config, value string) { config.RustServiceToken = value }},
-}
+type Config = config.Config
 
 func loadConfig(getenv func(string) string) (Config, error) {
-	var config Config
-	for _, field := range requiredConfigFields {
-		value := strings.TrimSpace(getenv(field.key))
-		if value == "" {
-			return Config{}, fmt.Errorf("missing required configuration: %s", field.key)
-		}
-		field.set(&config, value)
-	}
-	return config, nil
+	return config.Load(getenv)
 }
 
-func newHandler() http.Handler {
+func newHandler(logger *slog.Logger) http.Handler {
+	if logger == nil {
+		logger = observability.NewLogger(io.Discard)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = writer.Write([]byte("ok\n"))
 	})
-	return mux
+	return safeRequestEvents(logger, mux)
 }
 
 func run(getenv func(string) string, serve func(Config, http.Handler) error) error {
-	config, err := loadConfig(getenv)
+	return runWithLogger(getenv, observability.NewLogger(io.Discard), serve)
+}
+
+func runWithLogger(getenv func(string) string, logger *slog.Logger, serve func(Config, http.Handler) error) error {
+	configuration, err := loadConfig(getenv)
 	if err != nil {
+		observability.LogEvent(logger, slog.LevelError, "startup_failed", map[string]any{
+			"event":          "startup_failed",
+			"correlation_id": newCorrelationID(),
+			"config_key":     config.MissingKey(err),
+		})
 		return err
 	}
-	return serve(config, newHandler())
+	return serve(configuration, newHandler(logger))
+}
+
+func writePublicError(writer http.ResponseWriter, logger *slog.Logger, correlationID string) {
+	observability.LogEvent(logger, slog.LevelError, "server_error", map[string]any{
+		"event":          "server_error",
+		"correlation_id": correlationID,
+	})
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusInternalServerError)
+	_, _ = writer.Write(observability.PublicError(correlationID))
+}
+
+func safeRequestEvents(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		started := time.Now()
+		recorded := &statusRecorder{ResponseWriter: writer, status: http.StatusOK}
+		next.ServeHTTP(recorded, request)
+
+		observability.LogEvent(logger, slog.LevelInfo, "request_complete", map[string]any{
+			"method":         safeMethod(request.Method),
+			"route_path":     safeRoutePath(request.URL.Path),
+			"status":         recorded.status,
+			"duration_ms":    time.Since(started).Milliseconds(),
+			"correlation_id": newCorrelationID(),
+		})
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (writer *statusRecorder) WriteHeader(status int) {
+	writer.status = status
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *statusRecorder) Write(body []byte) (int, error) {
+	return writer.ResponseWriter.Write(body)
+}
+
+func safeMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return method
+	default:
+		return "OTHER"
+	}
+}
+
+func safeRoutePath(path string) string {
+	if path == "/healthz" {
+		return path
+	}
+	return "/unknown"
+}
+
+func newCorrelationID() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "00000000000000000000000000000000"
+	}
+	return hex.EncodeToString(bytes[:])
 }
 
 func main() {
-	if err := run(os.Getenv, func(config Config, handler http.Handler) error {
-		return http.ListenAndServe(config.ListenAddr, handler)
+	logger := observability.NewLogger(os.Stderr)
+	if err := runWithLogger(os.Getenv, logger, func(configuration Config, handler http.Handler) error {
+		return http.ListenAndServe(configuration.ListenAddr, handler)
 	}); err != nil {
-		log.Fatal(err)
+		os.Exit(1)
 	}
 }

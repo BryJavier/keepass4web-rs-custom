@@ -20,5 +20,10 @@ public/fonts/*
 # data
 *.kdbx
 
+# Runtime environment files; committed *.env.example files are safe templates.
+/deploy/config/*.development.env
+/deploy/config/*.staging.env
+/deploy/config/*.production.env
+
 # jetbrains
 .idea

@@ -2,6 +2,8 @@ FROM golang:1.26.5-alpine AS test
 
 WORKDIR /workspace
 
+RUN apk add --no-cache git
+
 COPY . .
 
 RUN go test ./...

@@ -34,12 +34,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. An operator can confirm that Go is the only public service and Rust accepts traffic only on its private network.
   4. A developer can verify that sensitive request and vault data are absent from logs, traces, errors, and sessions.
 
-**Plans**: 1/5 plans executed
+**Plans**: 2/5 plans executed
 
 - [x] 01-01-PLAN.md
 - [ ] 01-02-PLAN.md
 - [ ] 01-03-PLAN.md
-- [ ] 01-04-PLAN.md
+- [x] 01-04-PLAN.md
 - [ ] 01-05-PLAN.md
 
 ### Phase 2: Supabase Multi-Vault Foundation
@@ -124,7 +124,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Baseline & Operations | 1/5 | In Progress|  |
+| 1. Baseline & Operations | 2/5 | In Progress|  |
 | 2. Supabase Multi-Vault Foundation | 0/TBD | Not started | - |
 | 3. Private Rust KeePass Service | 0/TBD | Not started | - |
 | 4. Authorized Go Application | 0/TBD | Not started | - |

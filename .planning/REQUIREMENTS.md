@@ -10,7 +10,7 @@
 - [ ] **FOUND-01**: A developer can run the captured baseline tests with the supported Go, Rust, and Supabase tool versions.
 - [x] **FOUND-02**: An operator can configure development, staging, and production from ignored Go, Rust, and Supabase configuration templates without committing a real secret.
 - [x] **FOUND-03**: An operator can deploy a topology in which Go is the only public service and Rust is reachable only on its private network.
-- [ ] **FOUND-04**: A developer can verify that request bodies, authorization headers, passwords, key-file bytes, tokens, decoded data, and protected values are redacted from logs, traces, errors, and sessions.
+- [x] **FOUND-04**: A developer can verify that request bodies, authorization headers, passwords, key-file bytes, tokens, decoded data, and protected values are redacted from logs, traces, errors, and sessions.
 
 ### Authentication & Private Vaults
 
@@ -78,7 +78,7 @@
 | FOUND-01 | Phase 1 | Pending |
 | FOUND-02 | Phase 1 | Complete |
 | FOUND-03 | Phase 1 | Complete |
-| FOUND-04 | Phase 1 | Pending |
+| FOUND-04 | Phase 1 | Complete |
 | AUTH-01 | Phase 2 | Pending |
 | VAULT-01 | Phase 2 | Pending |
 | VAULT-02 | Phase 2 | Pending |

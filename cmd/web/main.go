@@ -114,7 +114,7 @@ func newCorrelationID() string {
 }
 
 func main() {
-	logger := observability.NewLogger(os.Stderr)
+	logger := observability.NewLogger(io.MultiWriter(os.Stdout, os.Stderr))
 	if err := runWithLogger(os.Getenv, logger, func(configuration Config, handler http.Handler) error {
 		return http.ListenAndServe(configuration.ListenAddr, handler)
 	}); err != nil {

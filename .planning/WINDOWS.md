@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 0
+open_count: 1
 waived_count: 0
 fixed_count: 4
-total_count: 4
-last_updated: 2026-08-02T14:48:58.870Z
+total_count: 5
+last_updated: 2026-08-02T22:06:41.540Z
 ---
 
 # Broken Windows Ledger
@@ -19,6 +19,7 @@ last_updated: 2026-08-02T14:48:58.870Z
 | 2 | 01 | deviation | docker-compose.yml |  | Added WEB_HOST_PORT override to complete tracer verification around unrelated local port conflict. | fixed |  | 2026-08-02T14:46:58.669Z | 2026-08-02T14:48:58.693Z |
 | 3 | 01 | deviation | cmd/web/Dockerfile |  | Added Git in test stage so required git check-ignore contract runs in container. | fixed |  | 2026-08-02T14:46:58.763Z | 2026-08-02T14:48:58.783Z |
 | 4 | 01 | deviation | tests/operations/config_templates_test.go |  | Narrowed secret-shaped heuristic so safe issuer URLs are not classified as tokens. | fixed |  | 2026-08-02T14:46:58.853Z | 2026-08-02T14:48:58.870Z |
+| 5 | 01 | deviation | cmd/web/main.go |  | Mirrored already-sanitized JSON events to stdout and stderr so the output audit fails closed for both process sinks. | open |  | 2026-08-02T22:06:41.540Z |  |
 
 ````json
 [
@@ -69,6 +70,18 @@ last_updated: 2026-08-02T14:48:58.870Z
     "reason": "",
     "recorded_at": "2026-08-02T14:46:58.853Z",
     "resolved_at": "2026-08-02T14:48:58.870Z"
+  },
+  {
+    "id": 5,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "cmd/web/main.go",
+    "line": null,
+    "description": "Mirrored already-sanitized JSON events to stdout and stderr so the output audit fails closed for both process sinks.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-02T22:06:41.540Z",
+    "resolved_at": null
   }
 ]
 ````

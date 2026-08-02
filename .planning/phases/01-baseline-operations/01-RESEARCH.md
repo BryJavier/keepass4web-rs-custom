@@ -210,17 +210,15 @@ The test must cover the requirement’s request bodies, authorization headers, p
 | A3 | CI can evaluate the resolved Compose topology as a static policy check. | Code Examples | Installed Compose output compatibility may require a YAML fallback. |
 | A4 | Sensitive values can be covered by sentinel-injection tests before the future service schemas are complete. | Code Examples | Tests may need adaptation once Go/Rust contracts are finalized. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Exact supported Go and Rust patch versions**
+1. **Exact supported Go, Rust, and tool versions — RESOLVED**
    - What we know: the repository has no `go.mod` or Rust toolchain pin, and Go/Cargo are absent from this workstation’s shell. [VERIFIED: repository scan, 2026-08-02] [VERIFIED: local environment command probes, 2026-08-02]
-   - What is unclear: which exact versions compile the current Cargo lockfile and the new Go skeleton in CI.
-   - Recommendation: make the first Phase 1 task capture versions from a green CI run, then commit those exact values and use them in local/CI setup. [ASSUMED]
+   - Resolution: Capture the exact Go, Rust, Node, Docker Compose, and Supabase CLI versions from the first green **containerized** baseline; commit them as the exact supported developer and CI contract. [APPROVED]
 
-2. **Production secret manager and ingress platform**
+2. **Production cloud/provider selection — RESOLVED / DEFERRED**
    - What we know: the approved topology requires separate development, staging, and production configuration, but does not select a cloud or secret manager. [VERIFIED: .planning/REQUIREMENTS.md:12-15]
-   - What is unclear: provider-specific deployment and rotation commands.
-   - Recommendation: define a provider-neutral environment-variable contract in Phase 1 and defer the backing secret store choice to an operator decision before production deployment. [ASSUMED]
+   - Resolution: Cloud/provider selection is explicitly deferred. Provider-neutral controls are locked: use a managed secret store, TLS-terminating ingress, and Go-only public exposure; Rust remains private with no listener, route, host port, or ingress. [APPROVED] [VERIFIED: .planning/PROJECT.md:42-44]
 
 ## Environment Availability
 

@@ -6,7 +6,8 @@ RUN apk add --no-cache git
 
 COPY . .
 
-RUN go test ./...
+# Compose policy tests require the host Docker resolver and run in operations CI.
+RUN go test ./cmd/web ./internal/...
 
 FROM golang:1.26.5-alpine AS build
 

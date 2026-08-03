@@ -62,6 +62,15 @@ func TestConfigurationTemplates(t *testing.T) {
 		}
 	}
 
+	for _, environment := range []string{"development", "staging", "production"} {
+		target := filepath.Join("deploy", "config", environment+".compose.env")
+		command := exec.Command("git", "check-ignore", "--no-index", "--quiet", target)
+		command.Dir = root
+		if err := command.Run(); err != nil {
+			t.Errorf("%s must be ignored: %v", target, err)
+		}
+	}
+
 	for _, service := range []string{"go", "rust", "supabase"} {
 		example := filepath.Join("deploy", "config", service+".env.example")
 		command := exec.Command("git", "check-ignore", "--no-index", "--quiet", example)

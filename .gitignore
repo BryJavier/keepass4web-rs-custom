@@ -24,6 +24,9 @@ public/fonts/*
 /deploy/config/*.development.env
 /deploy/config/*.staging.env
 /deploy/config/*.production.env
+/deploy/config/development.compose.env
+/deploy/config/staging.compose.env
+/deploy/config/production.compose.env
 
 # jetbrains
 .idea

@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: baseline-operations
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-08-03T00:40:19.707Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-08-03T01:38:09.793Z"
 last_activity: 2026-08-02
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 5
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-02)
 ## Current Position
 
 Phase: 01 (baseline-operations) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-08-02 — Phase 01 execution started
 
-Progress: [██████░░░░] 60%
+Progress: [████████░░] 80%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [██████░░░░] 60%
 | Phase 01 P01 | 47m | 2 tasks | 10 files |
 | Phase 01 P04 | 6h 49m | 2 tasks | 8 files |
 | Phase 01-baseline-operations P02 | 9h 40m | 2 tasks | 8 files |
+| Phase 01 P05 | 45m | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,7 @@ Decisions are logged in PROJECT.md Key Decisions table. Current non-negotiables:
 - [Phase ?]: Captured exact numeric toolchain versions from green official-image probes and enforce them from tools/versions.env.
 - [Phase ?]: CI verifies SHA-256 values for official Supabase CLI and Docker Compose assets before installation.
 - [Phase ?]: Containerized Rust baseline tests use the repository keyring seccomp profile.
+- [Phase ?]: Rust telemetry now uses constant SafeEvent identities with generic correlated errors.
 
 ### Pending Todos
 
@@ -96,6 +98,6 @@ None yet. Preserve the approved private-Rust boundary and six-phase ordering dur
 
 ## Session Continuity
 
-Last session: 2026-08-03T00:40:19.701Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-08-03T01:38:09.784Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None

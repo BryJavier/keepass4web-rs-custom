@@ -83,7 +83,8 @@ run_containerized_baseline() {
     apk add --no-cache git >/dev/null
     go test ./...
   '
-  docker run --rm -v "$repository_root:/workspace:ro" -w /workspace \
+  docker run --rm --security-opt "seccomp=$repository_root/seccomp/keyring.json" \
+    -v "$repository_root:/workspace:ro" -w /workspace \
     -e CARGO_HOME=/tmp/cargo -e CARGO_TARGET_DIR=/tmp/target "rust:$RUST_VERSION" \
     cargo test --locked
   docker run --rm -v "$repository_root:/workspace" -w /workspace "node:$NODE_VERSION" sh -ceu '

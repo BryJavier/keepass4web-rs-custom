@@ -1,9 +1,9 @@
 use actix_session::Session;
-use log::error;
 use serde::de::DeserializeOwned;
 
 use crate::auth::{SESSION_KEY_USER, SESSION_USER_UNKNOWN};
 use crate::auth_backend::UserInfo;
+use crate::observability::{self, SafeEvent};
 
 pub trait AuthSession {
     fn destroy(&self);
@@ -20,8 +20,8 @@ impl AuthSession for Session {
     fn get_key<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
         match self.get::<T>(key) {
             Ok(s) => s,
-            Err(err) => {
-                error!("failed to retrieve session: {}", err);
+            Err(_) => {
+                observability::emit(log::Level::Error, SafeEvent::SessionFailure, "session", None);
                 None
             }
         }

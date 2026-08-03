@@ -1,7 +1,6 @@
 use actix_session::Session;
 use actix_web::{get, HttpRequest, HttpResponse, post, Responder, web};
 use actix_web::web::Data;
-use log::{error, info};
 use mime::TEXT_HTML;
 use serde::Serialize;
 use serde_json::json;
@@ -15,6 +14,7 @@ use crate::keepass::keepass::KeePass;
 use crate::server::route::INDEX_FILE;
 use crate::server::route::util::{_close_db, check_user_session, db_is_open, revoke_key, set_user_session, store_key};
 use crate::session::AuthSession;
+use crate::observability::{self, SafeEvent};
 
 #[derive(Serialize)]
 struct Settings {
@@ -63,8 +63,8 @@ async fn user_login(session: Session, config: Data<Config>, params: web::Form<Us
     // TODO: differentiate between real error and login failed
     let user_info = match auth_backend.login(params.username.as_str(), params.password.as_str()).await {
         Ok(user_info) => user_info,
-        Err(err) => {
-            info!("user login from '{}': {}", params.username, err);
+        Err(_) => {
+            observability::emit(log::Level::Warn, SafeEvent::AuthenticationFailure, "session", Some(401));
             return HttpResponse::Unauthorized().json(json!(
                 {
                     "success": false,
@@ -76,16 +76,11 @@ async fn user_login(session: Session, config: Data<Config>, params: web::Form<Us
 
     let csrf_token = match set_user_session(session, &user_info) {
         Ok(v) => v,
-        Err(err) => return HttpResponse::InternalServerError().json(json!(
-            {
-                "success": false,
-                "message": err.to_string(),
-            }
-        )),
+        Err(_) => return HttpResponse::InternalServerError().json(observability::public_error("session")),
     };
 
 
-    info!("user login from '{}': successful", params.username);
+    observability::emit(log::Level::Info, SafeEvent::AuthenticationFailure, "session", Some(200));
     HttpResponse::Ok().json(json!(
         {
             "success": true,
@@ -104,8 +99,6 @@ async fn user_login(session: Session, config: Data<Config>, params: web::Form<Us
 
 #[post("/backend_login")]
 async fn backend_login(session: Session, config: Data<Config>, params: web::Form<BackendLogin>) -> impl Responder {
-    let username = session.get_user_id();
-
     let db_backend = db_backend::new(&config);
     if db_backend.authenticated() {
         return HttpResponse::BadRequest().json(json!(
@@ -116,8 +109,8 @@ async fn backend_login(session: Session, config: Data<Config>, params: web::Form
         ));
     }
 
-    if let Err(err) = db_backend.init(params) {
-        info!("backend login from '{}': {}", username, err);
+    if db_backend.init(params).is_err() {
+        observability::emit(log::Level::Warn, SafeEvent::AuthenticationFailure, "session", Some(401));
         return HttpResponse::Unauthorized().json(json!(
             {
                 "success": false,
@@ -127,7 +120,7 @@ async fn backend_login(session: Session, config: Data<Config>, params: web::Form
     };
 
 
-    info!("backend login from '{}': successful", username);
+    observability::emit(log::Level::Info, SafeEvent::AuthenticationFailure, "session", Some(200));
     HttpResponse::Ok().json(json!(
         {
             "success": true,
@@ -137,8 +130,6 @@ async fn backend_login(session: Session, config: Data<Config>, params: web::Form
 
 #[post("/db_login")]
 async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache>, params: web::Form<DbLogin>) -> impl Responder {
-    let username = session.get_user_id();
-
     let is_open = match db_is_open(&session, &config, &db_cache).await {
         Ok(v) => v,
         Err(err) => return err,
@@ -161,8 +152,8 @@ async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache
     let db_backend = db_backend::new(&config);
     let db = match KeePass::from_backend(&config, db_backend.as_ref(), &params, &user_info).await {
         Ok(v) => v,
-        Err(err) => {
-            info!("db login from '{}': {}", username, err);
+        Err(_) => {
+            observability::emit(log::Level::Warn, SafeEvent::VaultOperationFailure, "session", Some(401));
 
             return HttpResponse::Unauthorized().json(json!(
                 {
@@ -175,8 +166,8 @@ async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache
 
     let (key, enc_db) = match db.to_enc() {
         Ok(v) => v,
-        Err(err) => {
-            error!("db login from '{}': {}", username, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
 
             return HttpResponse::InternalServerError().json(json!(
                 {
@@ -187,8 +178,8 @@ async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache
         }
     };
 
-    if let Err(err) = store_key(&config, &session, key) {
-        error!("db login from '{}': failed to store key: {}", username, err);
+    if store_key(&config, &session, key).is_err() {
+        observability::emit(log::Level::Error, SafeEvent::SessionFailure, "session", Some(500));
         return HttpResponse::InternalServerError().json(json!(
             {
                 "success": true,
@@ -197,10 +188,10 @@ async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache
         ));
     }
 
-    if let Err(err) = db_cache.store(&session, enc_db).await {
-        error!("db login from '{}': failed to store db: {}", username, err);
-        if let Err(err) = revoke_key(&config, &session) {
-            error!("db login from '{}': failed to revoke db key: {}", username, err);
+    if db_cache.store(&session, enc_db).await.is_err() {
+        observability::emit(log::Level::Error, SafeEvent::CacheLifecycle, "session", Some(500));
+        if revoke_key(&config, &session).is_err() {
+            observability::emit(log::Level::Error, SafeEvent::SessionFailure, "session", Some(500));
         }
         return HttpResponse::InternalServerError().json(json!(
             {
@@ -210,7 +201,7 @@ async fn db_login(session: Session, config: Data<Config>, db_cache: Data<DbCache
         ));
     }
 
-    info!("db login from '{}': successful", username);
+    observability::emit(log::Level::Info, SafeEvent::VaultOperationFailure, "session", Some(200));
     HttpResponse::Ok().json(json!(
         {
             "success": true,
@@ -226,8 +217,8 @@ fn get_user_info(session: &Session) -> Result<UserInfo, HttpResponse> {
         }
     ));
     let user_info = match session.get::<UserInfo>(SESSION_KEY_USER) {
-        Err(err) => {
-            error!("failed to retrieve session: {}", err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::SessionFailure, "session", Some(500));
             return Err(resp);
         }
         Ok(Some(v)) => v,
@@ -242,7 +233,7 @@ async fn close_db(session: Session, config: Data<Config>, db_cache: Data<DbCache
         return err;
     }
 
-    info!("close db from '{}': successful", session.get_user_id());
+    observability::emit(log::Level::Info, SafeEvent::VaultOperationFailure, "session", Some(200));
     HttpResponse::Ok().json(json!(
         {
             "success": true,
@@ -260,8 +251,8 @@ async fn logout(request: HttpRequest, session: Session, config: Data<Config>, db
     let host = format!("{}://{}", request.connection_info().scheme(), request.connection_info().host());
     let logout_type = match auth_backend::new(&config).get_logout_type(&user_info, &host, &auth_cache) {
         Ok(logout_type) => logout_type,
-        Err(err) => {
-            error!("failed to determine logout type: {}", err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::AuthenticationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                {
                    "success": false,
@@ -276,8 +267,7 @@ async fn logout(request: HttpRequest, session: Session, config: Data<Config>, db
 
     session.destroy();
 
-    let username = session.get_user_id();
-    info!("logout from '{}': successful", username);
+    observability::emit(log::Level::Info, SafeEvent::AuthenticationFailure, "session", Some(200));
 
     HttpResponse::Ok().json(json!(
         {
@@ -313,19 +303,19 @@ async fn callback_user_auth(
     let host = format!("{}://{}", request.connection_info().scheme(), request.connection_info().host());
     let user_info = match auth_backend::new(&config).callback(from_session, &auth_cache, params.0, &host).await {
         Ok(user_info) => user_info,
-        Err(err) => {
-            info!("user login from '{}': {:?}", username, err);
+        Err(_) => {
+            observability::emit(log::Level::Warn, SafeEvent::AuthenticationFailure, "session", Some(401));
             session.destroy();
-            return embed_in_index(false, Some(err.to_string()), None).await;
+            return embed_in_index(false, Some("request failed".to_string()), None).await;
         }
     };
 
     let csrf_token = match set_user_session(session, &user_info) {
-        Err(err) => return embed_in_index(false, Some(err.to_string()), None).await,
+        Err(_) => return embed_in_index(false, Some("request failed".to_string()), None).await,
         Ok(v) => v,
     };
 
-    info!("user login from '{}': successful", &user_info.id);
+    observability::emit(log::Level::Info, SafeEvent::AuthenticationFailure, "session", Some(200));
 
     embed_in_index(true, None, Some(
         SessionData {
@@ -343,8 +333,8 @@ async fn callback_user_auth(
 async fn embed_in_index(success: bool, message: Option<String>, data: Option<SessionData>) -> HttpResponse {
     let mut index = match tokio::fs::read_to_string(INDEX_FILE).await {
         Ok(v) => v,
-        Err(err) => {
-            info!("user login from '{}': ", err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,

@@ -10,6 +10,11 @@ const AUTH_SENTINEL: &str = "authorization-sentinel-01-05";
 const QUERY_SENTINEL: &str = "query-sentinel-01-05";
 const COOKIE_SENTINEL: &str = "cookie-sentinel-01-05";
 const BODY_SENTINEL: &str = "body-sentinel-01-05";
+const USERNAME_SENTINEL: &str = "username-sentinel-01-05";
+const PASSWORD_SENTINEL: &str = "password-sentinel-01-05";
+const KEYFILE_SENTINEL: &str = "keyfile-sentinel-01-05";
+const TOKEN_SENTINEL: &str = "token-sentinel-01-05";
+const SESSION_SENTINEL: &str = "session-sentinel-01-05";
 
 struct RunningServer {
     child: Child,
@@ -94,6 +99,18 @@ fn assert_sentinels_absent(output: &str) {
     }
 }
 
+fn assert_auth_sentinels_absent(output: &str) {
+    for sentinel in [
+        USERNAME_SENTINEL,
+        PASSWORD_SENTINEL,
+        KEYFILE_SENTINEL,
+        TOKEN_SENTINEL,
+        SESSION_SENTINEL,
+    ] {
+        assert!(!output.contains(sentinel), "sensitive sentinel leaked: {sentinel}");
+    }
+}
+
 fn response_correlation_id(response: &str) -> String {
     let marker = "\"correlation_id\":\"";
     let start = response.find(marker).expect("generic error exposes a correlation ID") + marker.len();
@@ -123,4 +140,51 @@ fn hostile_request() {
         assert!(stdout.contains(field), "safe request event missing {field}: {stdout}");
     }
     assert!(!stdout.contains("HTTP/1.1"), "raw request line leaked: {stdout}");
+}
+
+#[test]
+fn auth_and_session() {
+    let server = RunningServer::start();
+    let login_body = format!("username={USERNAME_SENTINEL}&password={PASSWORD_SENTINEL}");
+    let login = server.request(&format!(
+        "POST /api/v1/user_login HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{login_body}",
+        login_body.len(),
+    ));
+    assert!(login.contains("HTTP/1.1 200"), "login failed: {login}");
+
+    let cookie = login
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: ").or_else(|| line.strip_prefix("Set-Cookie: ")))
+        .and_then(|value| value.split(';').next())
+        .expect("login response sets a session cookie");
+    let csrf_marker = "\"csrf_token\":\"";
+    let csrf_start = login.find(csrf_marker).expect("login response contains CSRF token") + csrf_marker.len();
+    let csrf_end = login[csrf_start..].find('"').expect("CSRF token is terminated") + csrf_start;
+    let csrf_token = &login[csrf_start..csrf_end];
+
+    let unlock_body = format!("password={PASSWORD_SENTINEL}&key={KEYFILE_SENTINEL}");
+    let unlock = server.request(&format!(
+        "POST /api/v1/db_login HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: {cookie}; supplied={SESSION_SENTINEL}\r\nX-CSRF-Token: {csrf_token}\r\nAuthorization: Bearer {TOKEN_SENTINEL}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{unlock_body}",
+        unlock_body.len(),
+    ));
+    let (stdout, stderr) = server.finish();
+
+    assert_non_empty("login response", &login);
+    assert_non_empty("unlock response", &unlock);
+    assert_non_empty("stdout", &stdout);
+    assert_non_empty("stderr", &stderr);
+    assert_auth_sentinels_absent(&login);
+    assert_auth_sentinels_absent(&unlock);
+    assert_auth_sentinels_absent(cookie);
+    assert_auth_sentinels_absent(&stdout);
+    assert_auth_sentinels_absent(&stderr);
+
+    for source in [
+        include_str!("../src/auth.rs"),
+        include_str!("../src/session.rs"),
+        include_str!("../src/server/route/auth.rs"),
+        include_str!("../src/server/route/util.rs"),
+    ] {
+        assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in an auth/session path");
+    }
 }

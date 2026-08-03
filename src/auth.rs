@@ -6,7 +6,6 @@ use actix_web::web::Data;
 use anyhow::{bail, Result};
 use constant_time_eq::constant_time_eq;
 use futures_util::future::LocalBoxFuture;
-use log::error;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::thread_rng;
 use serde::{Deserialize, Deserializer};
@@ -19,6 +18,7 @@ use crate::auth_backend::LoginType::Redirect;
 use crate::config::config::Config;
 use crate::server::route::{API_PATH, util};
 use crate::session::AuthSession;
+use crate::observability::{self, SafeEvent};
 
 pub(crate) const SESSION_KEY_USER: &str = "user";
 pub(crate) const SESSION_KEY_CSRF: &str = "csrf";
@@ -129,14 +129,10 @@ impl<S, B> Service<ServiceRequest> for CheckAuthMiddleware<S>
                                }
                             )).map_into_right_body()
                         }
-                        Err(err) => {
-                            error!("failed to determine login type: {}", err);
-                            HttpResponse::InternalServerError().json(json!(
-                               {
-                                   "success": false,
-                                   "message": "unauthorized: failed to determine login type",
-                               }
-                            )).map_into_right_body()
+                        Err(_) => {
+                            let correlation_id = observability::correlation_id(&request);
+                            observability::emit(log::Level::Error, SafeEvent::AuthenticationFailure, &correlation_id, Some(500));
+                            HttpResponse::InternalServerError().json(observability::public_error(&correlation_id)).map_into_right_body()
                         }
                     };
 
@@ -151,12 +147,9 @@ impl<S, B> Service<ServiceRequest> for CheckAuthMiddleware<S>
             && !csrf_matches(&request) {
             let (request, _) = request.into_parts();
 
-            let response = HttpResponse::Forbidden().json(json!(
-               {
-                   "success": false,
-                   "message": "csrf token mismatch",
-               }
-            )).map_into_right_body();
+            let correlation_id = observability::correlation_id(&request);
+            observability::emit(log::Level::Warn, SafeEvent::RequestRejected, &correlation_id, Some(403));
+            let response = HttpResponse::Forbidden().json(observability::public_error(&correlation_id)).map_into_right_body();
 
             return Box::pin(async { Ok(ServiceResponse::new(request, response)) });
         }

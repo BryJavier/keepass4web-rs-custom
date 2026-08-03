@@ -9,6 +9,7 @@ mod config;
 mod server;
 mod auth;
 mod keepass;
+mod observability;
 mod session;
 
 const CONFIG_FILE: &str = "config.yml";
@@ -24,8 +25,16 @@ struct Args {
 #[actix_web::main]
 async fn main() {
     let args = Args::parse();
-    let config = Config::from_file(args.config).expect("Failed to parse config");
+    observability::initialize();
+    let config = match Config::from_file(args.config) {
+        Ok(config) => config,
+        Err(_) => {
+            observability::emit(log::Level::Error, observability::SafeEvent::StartupFailure, "startup", None);
+            return;
+        }
+    };
 
-    Server::new(config)
-        .await.expect("Failed to start server")
+    if Server::new(config).await.is_err() {
+        observability::emit(log::Level::Error, observability::SafeEvent::StartupFailure, "startup", None);
+    }
 }

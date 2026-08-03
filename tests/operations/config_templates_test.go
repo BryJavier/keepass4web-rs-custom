@@ -54,7 +54,7 @@ func TestConfigurationTemplates(t *testing.T) {
 	for _, service := range []string{"go", "rust", "supabase"} {
 		for _, environment := range []string{"development", "staging", "production"} {
 			target := filepath.Join("deploy", "config", service+"."+environment+".env")
-			command := exec.Command("git", "check-ignore", "--no-index", "--quiet", target)
+			command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "--", target)
 			command.Dir = root
 			if err := command.Run(); err != nil {
 				t.Errorf("%s must be ignored: %v", target, err)
@@ -73,12 +73,87 @@ func TestConfigurationTemplates(t *testing.T) {
 
 	for _, service := range []string{"go", "rust", "supabase"} {
 		example := filepath.Join("deploy", "config", service+".env.example")
-		command := exec.Command("git", "check-ignore", "--no-index", "--quiet", example)
+		command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "--", example)
 		command.Dir = root
 		if err := command.Run(); err == nil {
 			t.Errorf("%s must remain eligible for tracking", example)
 		}
 	}
+}
+
+func TestDocumentedComposeEnvFilesAreIgnored(t *testing.T) {
+	root := repositoryRoot(t)
+	expected := map[string]struct{}{
+		"deploy/config/development.compose.env": {},
+		"deploy/config/staging.compose.env":     {},
+		"deploy/config/production.compose.env":  {},
+	}
+	actual := make(map[string]struct{})
+
+	for _, document := range []string{"docs/operations/configuration.md", "docs/operations/topology.md"} {
+		paths, err := documentedComposeEnvFiles(filepath.Join(root, document))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(paths) == 0 {
+			t.Errorf("%s documents no --env-file paths", document)
+			continue
+		}
+
+		for _, path := range paths {
+			if filepath.IsAbs(path) {
+				t.Errorf("%s documents an absolute --env-file path %q", document, path)
+				continue
+			}
+			if filepath.Dir(path) != "deploy/config" {
+				t.Errorf("%s documents --env-file path outside deploy/config: %q", document, path)
+				continue
+			}
+
+			actual[path] = struct{}{}
+			command := exec.Command("git", "check-ignore", "--no-index", "--quiet", "--", path)
+			command.Dir = root
+			if err := command.Run(); err != nil {
+				t.Errorf("%s documents trackable --env-file path %q: %v", document, path, err)
+			}
+		}
+	}
+
+	if !samePathSet(actual, expected) {
+		t.Errorf("documented --env-file paths = %v, want exactly %v", actual, expected)
+	}
+}
+
+func documentedComposeEnvFiles(path string) ([]string, error) {
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	tokens := strings.Fields(string(contents))
+	var paths []string
+	for index, token := range tokens {
+		if token != "--env-file" {
+			continue
+		}
+		if index+1 == len(tokens) {
+			return nil, fmt.Errorf("%s: --env-file has no path argument", path)
+		}
+		paths = append(paths, tokens[index+1])
+	}
+	return paths, nil
+}
+
+func samePathSet(actual, expected map[string]struct{}) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for path := range expected {
+		if _, found := actual[path]; !found {
+			return false
+		}
+	}
+	return true
 }
 
 func TestParseEnvironmentExampleRejectsUnsafeValues(t *testing.T) {

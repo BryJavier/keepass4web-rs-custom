@@ -23,4 +23,6 @@ COPY --from=build /out/web /web
 EXPOSE 8080
 USER 65532:65532
 
+HEALTHCHECK --interval=15s --timeout=3s --retries=3 CMD ["wget", "-q", "-O", "-", "http://127.0.0.1:8080/healthz"]
+
 CMD ["/web"]

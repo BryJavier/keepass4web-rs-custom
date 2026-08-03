@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use actix_web::HttpMessage;
+use actix_web::{HttpMessage, HttpRequest};
 use log::Level;
 use rand::distributions::{Alphanumeric, DistString};
 use rand::thread_rng;
@@ -48,20 +48,22 @@ pub fn emit(level: Level, event: SafeEvent, correlation_id: &str, status: Option
 }
 
 pub fn emit_request(
-    method: &str,
-    path: &str,
+    request: &HttpRequest,
     correlation_id: &str,
     status: u16,
     duration: Duration,
 ) {
+    let route = request
+        .match_pattern()
+        .unwrap_or_else(|| "unmatched".to_string());
     let event = format!(
         "level={} event={} correlation_id={} status={} method={} path={} duration_ms={}",
         Level::Info,
         SafeEvent::RequestCompleted.name(),
         correlation_id,
         status,
-        method,
-        path,
+        request.method(),
+        route,
         duration.as_millis(),
     );
 

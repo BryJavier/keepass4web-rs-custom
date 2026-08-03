@@ -15,6 +15,7 @@ const PASSWORD_SENTINEL: &str = "password-sentinel-01-05";
 const KEYFILE_SENTINEL: &str = "keyfile-sentinel-01-05";
 const TOKEN_SENTINEL: &str = "token-sentinel-01-05";
 const SESSION_SENTINEL: &str = "session-sentinel-01-05";
+const PATH_SENTINEL: &str = "path-sentinel-01-07";
 
 struct RunningServer {
     child: Child,
@@ -140,6 +141,56 @@ fn hostile_request() {
         assert!(stdout.contains(field), "safe request event missing {field}: {stdout}");
     }
     assert!(!stdout.contains("HTTP/1.1"), "raw request line leaked: {stdout}");
+}
+
+#[test]
+fn sensitive_sentinels_never_reach_outputs() {
+    let server = RunningServer::start();
+    let matched_response = server.request(&format!(
+        "GET /api/v1/icon/{PATH_SENTINEL} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    ));
+    let unmatched_response = server.request(&format!(
+        "GET /unregistered/{PATH_SENTINEL} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    ));
+    let (stdout, stderr) = server.finish();
+
+    for (label, capture) in [
+        ("matched HTTP response", &matched_response),
+        ("unmatched HTTP response", &unmatched_response),
+        ("stdout", &stdout),
+        ("stderr", &stderr),
+    ] {
+        assert_non_empty(label, capture);
+        assert!(
+            !capture.contains(PATH_SENTINEL),
+            "path sentinel leaked to {label}: {capture}",
+        );
+    }
+
+    for output in [&stdout, &stderr] {
+        assert!(
+            output.contains("path=/api/v1/icon/{id}"),
+            "matched route pattern missing from output: {output}",
+        );
+        assert!(
+            output.contains("path=unmatched"),
+            "unmatched route fallback missing from output: {output}",
+        );
+    }
+
+    assert!(
+        unmatched_response.contains("HTTP/1.1 404"),
+        "unmatched request did not return 404: {unmatched_response}",
+    );
+    assert!(
+        unmatched_response.contains("\"message\":\"request failed\""),
+        "unmatched response was not generic: {unmatched_response}",
+    );
+    let correlation_id = response_correlation_id(&unmatched_response);
+    assert!(
+        stdout.contains(&format!("correlation_id={correlation_id}")),
+        "unmatched request event does not share error correlation ID: {stdout}",
+    );
 }
 
 #[test]

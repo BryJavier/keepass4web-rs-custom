@@ -30,8 +30,6 @@ impl Server {
                 .app_data(config_data.clone())
                 .wrap(auth::CheckAuth)
                 .wrap_fn(|request, service| {
-                    let method = request.method().as_str().to_string();
-                    let path = request.path().to_string();
                     let correlation_id = observability::correlation_id(request.request());
                     let started = Instant::now();
                     let response = service.call(request);
@@ -39,8 +37,7 @@ impl Server {
                     async move {
                         let response = response.await?;
                         observability::emit_request(
-                            &method,
-                            &path,
+                            response.request(),
                             &correlation_id,
                             response.status().as_u16(),
                             started.elapsed(),

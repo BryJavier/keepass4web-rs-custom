@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: baseline-operations
 status: verifying
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-08-03T03:21:39.682Z"
+stopped_at: Completed 01-07-PLAN.md
+last_updated: "2026-08-03T03:36:51.661Z"
 last_activity: 2026-08-02
 last_activity_desc: Phase 01 execution started
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -32,7 +32,7 @@ Plan: 5 of 5
 Status: Phase complete — ready for verification
 Last activity: 2026-08-02 — Phase 01 execution started
 
-Progress: [█████████░] 86%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [█████████░] 86%
 | Phase 01-baseline-operations P02 | 9h 40m | 2 tasks | 8 files |
 | Phase 01 P05 | 45m | 3 tasks | 10 files |
 | Phase 01 P06 | 16min | 2 tasks | 2 files |
+| Phase 01 P07 | 26m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,8 @@ Decisions are logged in PROJECT.md Key Decisions table. Current non-negotiables:
 - [Phase ?]: Rust telemetry now uses constant SafeEvent identities with generic correlated errors.
 - [Phase ?]: Protect the exact root-anchored Compose environment filenames named by the runbooks while retaining trackable *.env.example templates.
 - [Phase ?]: Derive the Compose ignore contract from every documented --env-file occurrence rather than a disconnected hard-coded list.
+- [Phase ?]: Derive Rust request telemetry from post-routing HttpRequest::match_pattern with a fixed unmatched fallback.
+- [Phase ?]: Require non-empty HTTP, stdout, and stderr captures before Rust redaction sentinel checks.
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ None yet. Preserve the approved private-Rust boundary and six-phase ordering dur
 
 ## Session Continuity
 
-Last session: 2026-08-03T03:21:39.676Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-08-03T03:36:51.656Z
+Stopped at: Completed 01-07-PLAN.md
 Resume file: None

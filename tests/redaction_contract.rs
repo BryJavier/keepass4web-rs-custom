@@ -90,25 +90,34 @@ fn temporary_config(port: u16) -> PathBuf {
     path
 }
 
-fn assert_non_empty(label: &str, output: &str) {
-    assert!(!output.trim().is_empty(), "{label} capture is empty");
+fn assert_non_empty(label: &str, capture: &str) {
+    assert!(!capture.trim().is_empty(), "{label} capture is empty");
 }
 
-fn assert_sentinels_absent(output: &str) {
-    for sentinel in [AUTH_SENTINEL, QUERY_SENTINEL, COOKIE_SENTINEL, BODY_SENTINEL] {
-        assert!(!output.contains(sentinel), "sensitive sentinel leaked: {sentinel}");
+fn assert_redaction_scenario(
+    scenario: &str,
+    response: &str,
+    stdout: &str,
+    stderr: &str,
+    sentinels: &[&str],
+) {
+    let captures = [
+        ("HTTP response", response),
+        ("stdout", stdout),
+        ("stderr", stderr),
+    ];
+
+    for (sink, capture) in captures {
+        assert_non_empty(&format!("{scenario} {sink}"), capture);
     }
-}
 
-fn assert_auth_sentinels_absent(output: &str) {
-    for sentinel in [
-        USERNAME_SENTINEL,
-        PASSWORD_SENTINEL,
-        KEYFILE_SENTINEL,
-        TOKEN_SENTINEL,
-        SESSION_SENTINEL,
-    ] {
-        assert!(!output.contains(sentinel), "sensitive sentinel leaked: {sentinel}");
+    for (sink, capture) in captures {
+        for sentinel in sentinels {
+            assert!(
+                !capture.contains(sentinel),
+                "{scenario} leaked sensitive sentinel {sentinel} to {sink}: {capture}",
+            );
+        }
     }
 }
 
@@ -128,16 +137,17 @@ fn hostile_request() {
     ));
     let (stdout, stderr) = server.finish();
 
-    assert_non_empty("HTTP response", &response);
-    assert_non_empty("stdout", &stdout);
-    assert_non_empty("stderr", &stderr);
-    assert_sentinels_absent(&response);
-    assert_sentinels_absent(&stdout);
-    assert_sentinels_absent(&stderr);
+    assert_redaction_scenario(
+        "hostile request",
+        &response,
+        &stdout,
+        &stderr,
+        &[AUTH_SENTINEL, QUERY_SENTINEL, COOKIE_SENTINEL, BODY_SENTINEL],
+    );
     assert!(response.contains("\"message\":\"request failed\""), "error response was not generic: {response}");
     let correlation_id = response_correlation_id(&response);
     assert!(stdout.contains(&format!("correlation_id={correlation_id}")), "event does not share error correlation ID: {stdout}");
-    for field in ["method=POST", "path=/missing", "status=404", "duration_ms=", "correlation_id="] {
+    for field in ["method=POST", "path=unmatched", "status=404", "duration_ms=", "correlation_id="] {
         assert!(stdout.contains(field), "safe request event missing {field}: {stdout}");
     }
     assert!(!stdout.contains("HTTP/1.1"), "raw request line leaked: {stdout}");
@@ -145,33 +155,40 @@ fn hostile_request() {
 
 #[test]
 fn sensitive_sentinels_never_reach_outputs() {
-    let server = RunningServer::start();
-    let matched_response = server.request(&format!(
+    let matched_server = RunningServer::start();
+    let matched_response = matched_server.request(&format!(
         "GET /api/v1/icon/{PATH_SENTINEL} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
     ));
-    let unmatched_response = server.request(&format!(
-        "GET /unregistered/{PATH_SENTINEL} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-    ));
-    let (stdout, stderr) = server.finish();
+    let (matched_stdout, matched_stderr) = matched_server.finish();
 
-    for (label, capture) in [
-        ("matched HTTP response", &matched_response),
-        ("unmatched HTTP response", &unmatched_response),
-        ("stdout", &stdout),
-        ("stderr", &stderr),
-    ] {
-        assert_non_empty(label, capture);
-        assert!(
-            !capture.contains(PATH_SENTINEL),
-            "path sentinel leaked to {label}: {capture}",
-        );
-    }
-
-    for output in [&stdout, &stderr] {
+    assert_redaction_scenario(
+        "matched path request",
+        &matched_response,
+        &matched_stdout,
+        &matched_stderr,
+        &[PATH_SENTINEL],
+    );
+    for output in [&matched_stdout, &matched_stderr] {
         assert!(
             output.contains("path=/api/v1/icon/{id}"),
             "matched route pattern missing from output: {output}",
         );
+    }
+
+    let unmatched_server = RunningServer::start();
+    let unmatched_response = unmatched_server.request(&format!(
+        "GET /unregistered/{PATH_SENTINEL} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    ));
+    let (unmatched_stdout, unmatched_stderr) = unmatched_server.finish();
+
+    assert_redaction_scenario(
+        "unmatched path request",
+        &unmatched_response,
+        &unmatched_stdout,
+        &unmatched_stderr,
+        &[PATH_SENTINEL],
+    );
+    for output in [&unmatched_stdout, &unmatched_stderr] {
         assert!(
             output.contains("path=unmatched"),
             "unmatched route fallback missing from output: {output}",
@@ -188,8 +205,8 @@ fn sensitive_sentinels_never_reach_outputs() {
     );
     let correlation_id = response_correlation_id(&unmatched_response);
     assert!(
-        stdout.contains(&format!("correlation_id={correlation_id}")),
-        "unmatched request event does not share error correlation ID: {stdout}",
+        unmatched_stdout.contains(&format!("correlation_id={correlation_id}")),
+        "unmatched request event does not share error correlation ID: {unmatched_stdout}",
     );
 }
 
@@ -220,15 +237,29 @@ fn auth_and_session() {
     ));
     let (stdout, stderr) = server.finish();
 
-    assert_non_empty("login response", &login);
-    assert_non_empty("unlock response", &unlock);
-    assert_non_empty("stdout", &stdout);
-    assert_non_empty("stderr", &stderr);
-    assert_auth_sentinels_absent(&login);
-    assert_auth_sentinels_absent(&unlock);
-    assert_auth_sentinels_absent(cookie);
-    assert_auth_sentinels_absent(&stdout);
-    assert_auth_sentinels_absent(&stderr);
+    let sentinels = [
+        USERNAME_SENTINEL,
+        PASSWORD_SENTINEL,
+        KEYFILE_SENTINEL,
+        TOKEN_SENTINEL,
+        SESSION_SENTINEL,
+    ];
+    assert_non_empty("auth/session login response", &login);
+    assert_non_empty("auth/session unlock response", &unlock);
+    assert_non_empty("auth/session session cookie", cookie);
+    assert_redaction_scenario(
+        "auth/session",
+        &format!("{login}\n{unlock}"),
+        &stdout,
+        &stderr,
+        &sentinels,
+    );
+    for sentinel in sentinels {
+        assert!(
+            !cookie.contains(sentinel),
+            "auth/session leaked sensitive sentinel {sentinel} to session cookie: {cookie}",
+        );
+    }
 
     for source in [
         include_str!("../src/auth.rs"),
@@ -248,11 +279,18 @@ fn keepass_and_cache() {
     ));
     let (stdout, stderr) = server.finish();
 
-    for output in [&response, &stdout, &stderr] {
-        for sentinel in ["search-sentinel-01-05", "entry-sentinel-01-05", "protected-sentinel-01-05", "cache-session-sentinel-01-05"] {
-            assert!(!output.contains(sentinel), "sensitive KeePass/cache sentinel leaked: {sentinel}");
-        }
-    }
+    assert_redaction_scenario(
+        "KeePass/cache",
+        &response,
+        &stdout,
+        &stderr,
+        &[
+            "search-sentinel-01-05",
+            "entry-sentinel-01-05",
+            "protected-sentinel-01-05",
+            "cache-session-sentinel-01-05",
+        ],
+    );
     for source in [include_str!("../src/server/route/keepass.rs"), include_str!("../src/keepass/db_cache.rs")] {
         assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in a KeePass/cache path");
     }

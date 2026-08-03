@@ -1,7 +1,6 @@
 use actix_session::Session;
 use actix_web::{get, HttpResponse, Responder, web};
 use actix_web::web::Data;
-use log::info;
 use mime::IMAGE_PNG;
 use serde_json::json;
 use secrecy::ExposeSecret;
@@ -10,7 +9,7 @@ use crate::config::config::Config;
 use crate::keepass::db_cache::DbCache;
 use crate::keepass::keepass::{File, Id, Protected, SearchTerm};
 use crate::server::route::util;
-use crate::session::AuthSession;
+use crate::observability::{self, SafeEvent};
 
 #[get("/get_groups")]
 async fn get_groups(session: Session, config: Data<Config>, db_cache: Data<DbCache>) -> impl Responder {
@@ -19,11 +18,10 @@ async fn get_groups(session: Session, config: Data<Config>, db_cache: Data<DbCac
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let (groups, last_selected) = match keepass.get_groups() {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get groups: {}", username, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
@@ -51,11 +49,10 @@ async fn get_group_entries(session: Session, config: Data<Config>, db_cache: Dat
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let group_entries = match keepass.get_group_entries(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get entries for group '{}': {}", username, params.id, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
@@ -80,11 +77,10 @@ async fn get_entry(session: Session, config: Data<Config>, db_cache: Data<DbCach
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let entry = match keepass.get_entry(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get entry '{}': {}", username, params.id, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
@@ -109,11 +105,10 @@ async fn get_protected(session: Session, config: Data<Config>, db_cache: Data<Db
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let protected = match keepass.get_protected(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get protected '{}' of entry '{}': {}", username, params.name, params.entry_id, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
@@ -138,11 +133,10 @@ async fn get_file(session: Session, config: Data<Config>, db_cache: Data<DbCache
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let file = match keepass.get_file(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get file '{}' of entry '{}': {}", username, params.filename, params.entry_id, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
@@ -162,21 +156,15 @@ async fn search_entries(session: Session, config: Data<Config>, db_cache: Data<D
         Err(err) => return err,
     };
 
-    let username = session.get_user_id();
     let entries = match keepass.search_entries(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to search entries for term '{}': {}", username, params.term, err);
-
-            let mut msg = "failed to search entries".to_string();
-            if err.downcast_ref::<regex::Error>().is_some() {
-                msg = format!("failed to search entries: {}", err);
-            }
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
 
             return HttpResponse::InternalServerError().json(json!(
                 {
                     "success": false,
-                    "message": msg,
+                    "message": "failed to search entries",
                 }
             ));
         }
@@ -196,11 +184,10 @@ async fn get_icon(session: Session, config: Data<Config>, db_cache: Data<DbCache
         Ok(v) => v,
         Err(err) => return err,
     };
-    let username = session.get_user_id();
     let icon = match keepass.get_icon(&params) {
         Ok(v) => v,
-        Err(err) => {
-            info!("{}: failed to get icon '{}': {}", username, params.id, err);
+        Err(_) => {
+            observability::emit(log::Level::Error, SafeEvent::VaultOperationFailure, "session", Some(500));
             // TODO: Serve 404 if icon not found
             return HttpResponse::InternalServerError().json(json!(
                 {
@@ -219,4 +206,3 @@ async fn get_icon(session: Session, config: Data<Config>, db_cache: Data<DbCache
         .content_type(IMAGE_PNG)
         .body(icon.data.clone())
 }
-

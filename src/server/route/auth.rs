@@ -98,7 +98,7 @@ async fn user_login(session: Session, config: Data<Config>, params: web::Form<Us
 
 
 #[post("/backend_login")]
-async fn backend_login(session: Session, config: Data<Config>, params: web::Form<BackendLogin>) -> impl Responder {
+async fn backend_login(_session: Session, config: Data<Config>, params: web::Form<BackendLogin>) -> impl Responder {
     let db_backend = db_backend::new(&config);
     if db_backend.authenticated() {
         return HttpResponse::BadRequest().json(json!(

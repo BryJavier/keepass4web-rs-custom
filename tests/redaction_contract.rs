@@ -188,3 +188,21 @@ fn auth_and_session() {
         assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in an auth/session path");
     }
 }
+
+#[test]
+fn keepass_and_cache() {
+    let server = RunningServer::start();
+    let response = server.request(&format!(
+        "GET /api/v1/search_entries?term=search-sentinel-01-05&entry_id=entry-sentinel-01-05&name=protected-sentinel-01-05 HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: cache-session-sentinel-01-05\r\nConnection: close\r\n\r\n",
+    ));
+    let (stdout, stderr) = server.finish();
+
+    for output in [&response, &stdout, &stderr] {
+        for sentinel in ["search-sentinel-01-05", "entry-sentinel-01-05", "protected-sentinel-01-05", "cache-session-sentinel-01-05"] {
+            assert!(!output.contains(sentinel), "sensitive KeePass/cache sentinel leaked: {sentinel}");
+        }
+    }
+    for source in [include_str!("../src/server/route/keepass.rs"), include_str!("../src/keepass/db_cache.rs")] {
+        assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in a KeePass/cache path");
+    }
+}

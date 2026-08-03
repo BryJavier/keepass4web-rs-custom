@@ -7,12 +7,12 @@ use std::time::{Duration, Instant};
 use actix_session::Session;
 use anyhow::anyhow;
 use anyhow::Result;
-use log::info;
 use tokio::sync::RwLock;
 
 use crate::auth::SESSION_KEY_USER;
 use crate::auth_backend::UserInfo;
 use crate::keepass::encrypted::Encrypted;
+use crate::observability::{self, SafeEvent};
 
 const UPDATE_THRESHOLD: Duration = Duration::from_secs(1);
 
@@ -57,7 +57,7 @@ impl DbCache {
         let mut enc = self.read().await.get(user.as_str()).ok_or(anyhow!("enc db not found in store"))?.clone();
 
         if Instant::now() >= enc.expiry {
-            info!("database of user '{}' expired", user);
+            observability::emit(log::Level::Info, SafeEvent::CacheLifecycle, "session", None);
             return Err(CacheExpiredError.into());
         }
         // Don't update expiry if there are many requests in succession

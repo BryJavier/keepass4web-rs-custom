@@ -2,50 +2,96 @@ name: Tests
 
 on:
   push:
-    branches: [ "master" ]
+    branches: ["master"]
   pull_request:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-Ctarget-cpu=sandybridge -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3"
 
 jobs:
-  backend:
-    name: Backend Tests
+  baseline:
+    name: Exact baseline and frontend E2E
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-Ctarget-cpu=sandybridge -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3"
-      RUST_BACKTRACE: full
     steps:
       - uses: actions/checkout@v5
-      - name: Build
-        run: cargo build --verbose
-      - name: Run tests
-        run: cargo test --verbose
 
-  frontend-e2e:
-    name: Frontend E2E Tests
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-Ctarget-cpu=sandybridge -Ctarget-feature=+aes,+sse2,+sse4.1,+ssse3"
-    steps:
-      - uses: actions/checkout@v5
-      - name: Setup Node.js
+      - name: Load the exact toolchain contract
+        run: |
+          set -eu
+          set -a
+          . ./tools/versions.env
+          set +a
+          printf 'GO_VERSION=%s\n' "$GO_VERSION" >> "$GITHUB_ENV"
+          printf 'RUST_VERSION=%s\n' "$RUST_VERSION" >> "$GITHUB_ENV"
+          printf 'NODE_VERSION=%s\n' "$NODE_VERSION" >> "$GITHUB_ENV"
+          printf 'SUPABASE_CLI_VERSION=%s\n' "$SUPABASE_CLI_VERSION" >> "$GITHUB_ENV"
+          printf 'DOCKER_COMPOSE_VERSION=%s\n' "$DOCKER_COMPOSE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Setup exact Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup exact Rust
+        run: |
+          set -eu
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - name: Setup exact Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Install Playwright browsers
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Download and verify exact CLI releases
+        run: |
+          set -eu
+          set -a
+          . ./tools/versions.env
+          . ./tools/checksums.env
+          set +a
+          archive="$RUNNER_TEMP/supabase_${SUPABASE_CLI_VERSION}_linux_amd64.tar.gz"
+          plugin="$RUNNER_TEMP/docker-compose-linux-x86_64"
+          curl --fail --location --retry 3 --output "$archive" "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_${SUPABASE_CLI_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --retry 3 --output "$plugin" "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-x86_64"
+          printf '%s  %s\n' "$SUPABASE_CLI_LINUX_AMD64_SHA256" "$archive" | sha256sum --check --status -
+          printf '%s  %s\n' "$DOCKER_COMPOSE_LINUX_X86_64_SHA256" "$plugin" | sha256sum --check --status -
+
+      - name: Install verified Supabase CLI
+        run: |
+          set -eu
+          archive="$RUNNER_TEMP/supabase_${SUPABASE_CLI_VERSION}_linux_amd64.tar.gz"
+          mkdir -p "$RUNNER_TEMP/supabase-bin" "$HOME/.local/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/supabase-bin"
+          install -m 0755 "$RUNNER_TEMP/supabase-bin/supabase" "$HOME/.local/bin/supabase"
+          printf '%s\n' "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install verified Docker Compose plugin
+        run: |
+          set -eu
+          plugin="$RUNNER_TEMP/docker-compose-linux-x86_64"
+          mkdir -p "$HOME/.docker/cli-plugins"
+          install -m 0755 "$plugin" "$HOME/.docker/cli-plugins/docker-compose"
+
+      - name: Gate exact Supabase and Compose releases
+        run: |
+          set -eu
+          set -a
+          . ./tools/versions.env
+          set +a
+          actual_supabase=$(SUPABASE_TELEMETRY_DISABLED=1 supabase --version)
+          [ "$actual_supabase" = "$SUPABASE_CLI_VERSION" ] || { printf 'Supabase CLI version mismatch: expected %s, got %s\n' "$SUPABASE_CLI_VERSION" "$actual_supabase" >&2; exit 1; }
+          actual_compose=$(docker compose version --short)
+          [ "$actual_compose" = "$DOCKER_COMPOSE_VERSION" ] || { printf 'Docker Compose version mismatch: expected %s, got %s\n' "$DOCKER_COMPOSE_VERSION" "$actual_compose" >&2; exit 1; }
+
+      - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
-      - name: Build frontend
-        run: npm run build
-      - name: Build backend
-        run: cargo build
-      - name: Run Playwright tests
-        run: npm test
-        env:
-          CI: true
+
+      - name: Run shared locked baseline
+        run: scripts/verify-baseline.sh --ci
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v5

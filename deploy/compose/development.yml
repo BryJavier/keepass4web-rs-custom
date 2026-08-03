@@ -1,0 +1,19 @@
+services:
+  web:
+    restart: unless-stopped
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  rust-service:
+    restart: unless-stopped
+    volumes:
+      - ../../config.yml:/conf/config.yml:ro
+      - ../../tests/test.kdbx:/db.kdbx:ro
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

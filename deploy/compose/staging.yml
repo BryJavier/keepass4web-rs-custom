@@ -1,0 +1,20 @@
+services:
+  web:
+    image: ${WEB_IMAGE:?set WEB_IMAGE to an immutable Go image digest}
+    build: !reset null
+    restart: unless-stopped
+    healthcheck:
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  rust-service:
+    image: ${RUST_IMAGE:?set RUST_IMAGE to an immutable Rust image digest}
+    build: !reset null
+    restart: unless-stopped
+    healthcheck:
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s

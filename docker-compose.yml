@@ -4,14 +4,14 @@ services:
       context: .
       dockerfile: cmd/web/Dockerfile
     environment:
-      APP_ENV: development
-      APP_LISTEN_ADDR: :8080
-      APP_SESSION_SECRET: development-placeholder-not-a-secret
-      SUPABASE_URL: https://example.supabase.co
-      SUPABASE_ANON_KEY: development-placeholder-not-a-secret
-      SUPABASE_JWT_ISSUER: https://example.supabase.co/auth/v1
-      RUST_SERVICE_URL: http://rust-service:8080
-      RUST_SERVICE_TOKEN: development-placeholder-not-a-secret
+      APP_ENV: ${APP_ENV:-development}
+      APP_LISTEN_ADDR: ${APP_LISTEN_ADDR:-:8080}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:-replace-at-runtime-not-a-secret}
+      SUPABASE_URL: ${SUPABASE_URL:-https://example.supabase.co}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-public-anon-key-placeholder-not-a-secret}
+      SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-https://example.supabase.co/auth/v1}
+      RUST_SERVICE_URL: ${RUST_SERVICE_URL:-http://rust-service:8080}
+      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-replace-at-runtime-not-a-secret}
     ports:
       - "${WEB_HOST_PORT:-8080}:8080"
     networks:
@@ -19,14 +19,14 @@ services:
       - private
 
   rust-service:
-    image: ghcr.io/lixmal/keepass4web-rs:master
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      RUST_LISTEN_ADDR: ${RUST_LISTEN_ADDR:-:8080}
+      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-replace-at-runtime-not-a-secret}
     expose:
       - "8080"
-    volumes:
-      - ./config.yml:/conf/config.yml:ro
-      - ./tests/test.kdbx:/db.kdbx:ro
-    security_opt:
-      - seccomp=seccomp/keyring.json
     networks:
       - private
 

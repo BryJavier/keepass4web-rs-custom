@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,6 +168,71 @@ type fakeAuth struct {
 	calls    int
 }
 
+type fakeTrashPurger struct {
+	mu     sync.Mutex
+	calls  chan context.Context
+	errors []error
+	count  int
+}
+
+func (f *fakeTrashPurger) PurgeExpiredTrash(ctx context.Context) error {
+	f.mu.Lock()
+	index := f.count
+	f.count++
+	var err error
+	if index < len(f.errors) {
+		err = f.errors[index]
+	}
+	f.mu.Unlock()
+	select {
+	case f.calls <- ctx:
+	default:
+	}
+	return err
+}
+
+func TestPurgeExpiredTrashUsesBoundedContextAndRedactsFailure(t *testing.T) {
+	purger := &fakeTrashPurger{calls: make(chan context.Context, 1), errors: []error{errors.New("object path and service key")}}
+	failures := make(chan struct{}, 1)
+	app := NewApp(Dependencies{TrashPurger: purger, PurgeError: func() { failures <- struct{}{} }})
+
+	app.purgeExpiredTrash(context.Background())
+
+	select {
+	case ctx := <-purger.calls:
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 30*time.Second {
+			t.Fatalf("purge context deadline = %v (present %t), want a fresh 30 second bound", deadline, ok)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("purger was not called")
+	}
+	select {
+	case <-failures:
+	case <-time.After(time.Second):
+		t.Fatal("redacted purge failure callback was not called")
+	}
+}
+
+func TestPurgeSchedulerRetriesOnLaterTicks(t *testing.T) {
+	workerContext, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	purger := &fakeTrashPurger{
+		calls:  make(chan context.Context, 3),
+		errors: []error{errors.New("first request failed")},
+	}
+	app := NewApp(Dependencies{TrashPurger: purger, TrashPurgeInterval: 10 * time.Millisecond, PurgeContext: workerContext})
+	_ = app
+
+	for want := 1; want <= 2; want++ {
+		select {
+		case <-purger.calls:
+		case <-time.After(time.Second):
+			t.Fatalf("purge calls = %d, want retry %d", want-1, want)
+		}
+	}
+}
+
 func (f *fakeAuth) Validate(context.Context, string) (supabase.Identity, error) {
 	f.calls++
 	return f.identity, f.err
@@ -176,6 +242,12 @@ type fakeRust struct {
 	closeErr       error
 	createEntryErr error
 	closed         []privateclient.HandleRequest
+	deleteErr      error
+	restoreErr     error
+	deleteResponse privateclient.DeleteEntryResponse
+	restoreResponse privateclient.RestoreEntryResponse
+	deleteRequests []privateclient.DeleteEntryRequest
+	restoreRequests []privateclient.RestoreEntryRequest
 }
 
 func (f *fakeRust) Unlock(context.Context, privateclient.UnlockRequest) (privateclient.UnlockResponse, error) {
@@ -209,11 +281,28 @@ func (f *fakeRust) CreateEntry(context.Context, privateclient.CreateEntryRequest
 	}
 	return privateclient.CreateEntryResponse{EntryID: "11111111-1111-1111-1111-111111111111", DatabaseB64: "ZmFrZS1rZGJ4"}, nil
 }
+func (f *fakeRust) DeleteEntry(_ context.Context, request privateclient.DeleteEntryRequest) (privateclient.DeleteEntryResponse, error) {
+	f.deleteRequests = append(f.deleteRequests, request)
+	if f.deleteErr != nil { return privateclient.DeleteEntryResponse{}, f.deleteErr }
+	return f.deleteResponse, nil
+}
+func (f *fakeRust) RestoreEntry(_ context.Context, request privateclient.RestoreEntryRequest) (privateclient.RestoreEntryResponse, error) {
+	f.restoreRequests = append(f.restoreRequests, request)
+	if f.restoreErr != nil { return privateclient.RestoreEntryResponse{}, f.restoreErr }
+	return f.restoreResponse, nil
+}
 
 type fakeSessionVaultsForCreate struct {
 	uploadedName  string
 	uploadedBytes []byte
 	vault         Vault
+	downloadBytes []byte
+	replaceErr error
+	replacedBytes []byte
+	trashedVaults []Vault
+	trashedEntries []DecodedEntry
+	entries []DecodedEntry
+	renamed, trashed, restored, entryTrashed, entryRestored int
 }
 
 func (f *fakeSessionVaultsForCreate) ListForSession(context.Context, string, string) ([]Vault, error) {
@@ -231,20 +320,32 @@ func (f *fakeSessionVaultsForCreate) UploadForSession(_ context.Context, _ strin
 	return Vault{ID: id, Name: name}, nil
 }
 func (f *fakeSessionVaultsForCreate) DownloadForSession(context.Context, string, string, Vault) ([]byte, error) {
-	return nil, nil
+	return f.downloadBytes, nil
 }
-func (f *fakeSessionVaultsForCreate) ReplaceForSession(context.Context, string, string, Vault, []byte) error {
-	return nil
+func (f *fakeSessionVaultsForCreate) DownloadActiveForSession(context.Context, string, string, string) ([]byte, error) {
+	if f.vault.ID == "" { return nil, errors.New("not found") }
+	return f.downloadBytes, nil
+}
+func (f *fakeSessionVaultsForCreate) ReplaceForSession(_ context.Context, _ string, _ string, _ Vault, data []byte) error {
+	f.replacedBytes = data
+	return f.replaceErr
 }
 func (f *fakeSessionVaultsForCreate) ReplaceDecodedEntries(context.Context, string, string, string, []DecodedEntry) error {
 	return nil
 }
 func (f *fakeSessionVaultsForCreate) DecodedEntries(context.Context, string, string, string) ([]DecodedEntry, error) {
-	return nil, nil
+	return f.entries, nil
 }
 func (f *fakeSessionVaultsForCreate) UpdateDecodedEntry(context.Context, string, string, string, string, DecodedEntry) error {
 	return nil
 }
+func (f *fakeSessionVaultsForCreate) RenameForSession(context.Context, string, string, string, string) error { f.renamed++; return nil }
+func (f *fakeSessionVaultsForCreate) TrashVaultForSession(context.Context, string, string, string) error { f.trashed++; return nil }
+func (f *fakeSessionVaultsForCreate) RestoreVaultForSession(context.Context, string, string, string) error { f.restored++; return nil }
+func (f *fakeSessionVaultsForCreate) TrashedVaultsForSession(context.Context, string, string) ([]Vault, error) { return f.trashedVaults, nil }
+func (f *fakeSessionVaultsForCreate) TrashEntryForSession(context.Context, string, string, string, string) error { f.entryTrashed++; return nil }
+func (f *fakeSessionVaultsForCreate) RestoreEntryForSession(context.Context, string, string, string, string) error { f.entryRestored++; return nil }
+func (f *fakeSessionVaultsForCreate) TrashedEntriesForSession(context.Context, string, string, string) ([]DecodedEntry, error) { return f.trashedEntries, nil }
 
 func TestProtectedRequestRejectsRevokedSupabaseToken(t *testing.T) {
 	auth := &fakeAuth{err: errors.New("revoked")}
@@ -531,4 +632,180 @@ func TestHeartbeatRequiresCSRFAndResetsIdleClock(t *testing.T) {
 	if time.Since(updated) > time.Second {
 		t.Fatalf("lastActivity not refreshed by heartbeat: %v", updated)
 	}
+}
+
+func TestVaultRenameRejectsMissingCSRFWithoutChangingMetadata(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Old"}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults})
+	cookie := app.CreateSession("owner-1")
+	form := url.Values{"vault_id": {"vault-a"}, "name": {"New"}}
+	request := httptest.NewRequest(http.MethodPost, "/vaults/rename", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusForbidden || sessionVaults.renamed != 0 {
+		t.Fatalf("rename without CSRF = status %d, calls %d; want 403 and no mutation", recorder.Code, sessionVaults.renamed)
+	}
+}
+
+func TestVaultDownloadReturnsActiveEncryptedBytesWithSafeAttachmentName(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "A/B\r\nC"}, downloadBytes: []byte("encrypted-kdbx")}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults})
+	cookie := app.CreateSession("owner-1")
+	request := httptest.NewRequest(http.MethodGet, "/vaults/download?vault_id=vault-a", nil)
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "encrypted-kdbx" {
+		t.Fatalf("download = status %d body %q", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q, want application/octet-stream", got)
+	}
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := recorder.Header().Get("Content-Disposition"); got != `attachment; filename="A_BC.kdbx"` {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
+}
+
+func TestVaultTrashRollsBackMetadataWhenActiveHandleCannotClose(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}}
+	rust := &fakeRust{closeErr: errors.New("offline")}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	form := url.Values{"csrf_token": {app.CSRFToken(cookie.Value)}, "vault_id": {"vault-a"}}
+	request := httptest.NewRequest(http.MethodPost, "/vaults/delete", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusServiceUnavailable || sessionVaults.trashed != 1 || sessionVaults.restored != 1 {
+		t.Fatalf("unsafe vault trash = status %d trashed %d restored %d", recorder.Code, sessionVaults.trashed, sessionVaults.restored)
+	}
+	if got := app.ActiveHandle(cookie.Value); got != "opaque-handle" {
+		t.Fatalf("active handle after failed close = %q, want retained", got)
+	}
+}
+
+func TestEntryTrashRequiresMasterPassword(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}}
+	rust := &fakeRust{}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a"} {
+		if err := writer.WriteField(key, value); err != nil { t.Fatal(err) }
+	}
+	if err := writer.Close(); err != nil { t.Fatal(err) }
+	request := httptest.NewRequest(http.MethodPost, "/vaults/entries/delete", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest || len(rust.deleteRequests) != 0 {
+		t.Fatalf("delete without master password = status %d calls %d", recorder.Code, len(rust.deleteRequests))
+	}
+}
+
+func TestEntryTrashDoesNotCreateTombstoneWhenStorageReplacementFails(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}, entries: []DecodedEntry{{EntryID: "entry-a"}}, replaceErr: errors.New("storage unavailable")}
+	rust := &fakeRust{deleteResponse: privateclient.DeleteEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := multipartFormRequest(t, "/vaults/entries/delete", cookie, map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a", "master_password": "master"})
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway || sessionVaults.entryTrashed != 0 {
+		t.Fatalf("storage failure = status %d tombstones %d", recorder.Code, sessionVaults.entryTrashed)
+	}
+}
+
+func TestEntryRestoreForwardsOnlyGroupAndCredentialsToRust(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{
+		vault: Vault{ID: "vault-a", Name: "Test"},
+		trashedEntries: []DecodedEntry{{EntryID: "entry-a", GroupID: "original-group", Title: "secret title", Username: "secret user", Password: "secret password", URL: "https://secret", Notes: "secret notes"}},
+	}
+	rust := &fakeRust{restoreResponse: privateclient.RestoreEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := multipartFormRequest(t, "/vaults/entries/restore", cookie, map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a", "master_password": "master"})
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusSeeOther || sessionVaults.entryRestored != 1 || len(rust.restoreRequests) != 1 {
+		t.Fatalf("restore = status %d lifecycle %d calls %d", recorder.Code, sessionVaults.entryRestored, len(rust.restoreRequests))
+	}
+	got := rust.restoreRequests[0]
+	if got.PreferredGroupID == nil || *got.PreferredGroupID != "original-group" || got.Title != "" || got.Username != "" || got.Password != "" || got.URL != "" || got.Notes != "" {
+		t.Fatalf("restore request exposed tombstone fields: %+v", got)
+	}
+}
+
+func TestEntryTrashListDoesNotExposeTombstoneSecrets(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{trashedEntries: []DecodedEntry{{EntryID: "entry-a", Title: "Shown", Username: "shown-user", Password: "secret-password", URL: "https://secret", Notes: "secret notes", Fields: map[string]string{"api_key": "secret-key"}}}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID = "vault-a"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := httptest.NewRequest(http.MethodGet, "/vaults/entries/trash", nil)
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || strings.Contains(recorder.Body.String(), "secret-") || strings.Contains(recorder.Body.String(), "api_key") {
+		t.Fatalf("entry trash response exposed sensitive tombstone data: status %d body %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func multipartFormRequest(t *testing.T, path string, cookie *http.Cookie, fields map[string]string) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil { t.Fatal(err) }
+	}
+	if err := writer.Close(); err != nil { t.Fatal(err) }
+	request := httptest.NewRequest(http.MethodPost, path, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.AddCookie(cookie)
+	return request
 }

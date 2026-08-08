@@ -30,6 +30,8 @@ type Vault struct {
 	ID         string
 	Name       string
 	ObjectPath string
+	TrashedAt  *time.Time
+	PurgeAfter *time.Time
 }
 
 // VaultRepository remains the small metadata seam used by existing fakes.
@@ -42,10 +44,18 @@ type SessionVaultRepository interface {
 	VaultForSession(context.Context, string, string, string) (Vault, bool, error)
 	UploadForSession(context.Context, string, string, string, string, []byte) (Vault, error)
 	DownloadForSession(context.Context, string, string, Vault) ([]byte, error)
+	DownloadActiveForSession(context.Context, string, string, string) ([]byte, error)
 	ReplaceForSession(context.Context, string, string, Vault, []byte) error
 	ReplaceDecodedEntries(context.Context, string, string, string, []DecodedEntry) error
 	DecodedEntries(context.Context, string, string, string) ([]DecodedEntry, error)
 	UpdateDecodedEntry(context.Context, string, string, string, string, DecodedEntry) error
+	RenameForSession(context.Context, string, string, string, string) error
+	TrashVaultForSession(context.Context, string, string, string) error
+	RestoreVaultForSession(context.Context, string, string, string) error
+	TrashedVaultsForSession(context.Context, string, string) ([]Vault, error)
+	TrashEntryForSession(context.Context, string, string, string, string) error
+	RestoreEntryForSession(context.Context, string, string, string, string) error
+	TrashedEntriesForSession(context.Context, string, string, string) ([]DecodedEntry, error)
 }
 type RustVaultService interface {
 	Unlock(context.Context, privateclient.UnlockRequest) (privateclient.UnlockResponse, error)
@@ -57,6 +67,8 @@ type RustVaultService interface {
 	Close(context.Context, privateclient.HandleRequest) error
 	CreateVault(context.Context, privateclient.CreateVaultRequest) (privateclient.CreateVaultResponse, error)
 	CreateEntry(context.Context, privateclient.CreateEntryRequest) (privateclient.CreateEntryResponse, error)
+	DeleteEntry(context.Context, privateclient.DeleteEntryRequest) (privateclient.DeleteEntryResponse, error)
+	RestoreEntry(context.Context, privateclient.RestoreEntryRequest) (privateclient.RestoreEntryResponse, error)
 }
 type DecodedEntry struct {
 	EntryID  string
@@ -67,9 +79,16 @@ type DecodedEntry struct {
 	URL      string
 	Notes    string
 	Fields   map[string]string
+	TrashedAt  *time.Time
+	PurgeAfter *time.Time
 }
 type TokenValidator interface {
 	Validate(context.Context, string) (supabase.Identity, error)
+}
+// TrashPurger is the only server-only capability the HTTP app receives. Its
+// implementation retains any service-role credential outside this package.
+type TrashPurger interface {
+	PurgeExpiredTrash(context.Context) error
 }
 type Dependencies struct {
 	Vaults          VaultRepository
@@ -84,6 +103,17 @@ type Dependencies struct {
 	IdleTimeout time.Duration
 	// SweepInterval is how often the idle sweep checks sessions. Defaults to 5s.
 	SweepInterval time.Duration
+	// TrashPurger is optional outside production, where a service-role key is
+	// required by configuration. It is never exposed to browser handlers.
+	TrashPurger TrashPurger
+	// TrashPurgeInterval is how often expired trash is removed. Defaults to 1h.
+	TrashPurgeInterval time.Duration
+	// PurgeError receives no error detail so background failures cannot leak
+	// credentials, object paths, or user identifiers through logs.
+	PurgeError func()
+	// PurgeContext is normally context.Background. Tests may cancel it to stop
+	// the lifecycle worker deterministically.
+	PurgeContext context.Context
 }
 type session struct {
 	userID, accessToken, csrfToken, activeHandle, activeVaultID, email string
@@ -98,6 +128,8 @@ type App struct {
 	supabaseURL     string
 	supabaseAnonKey string
 	idleTimeout     time.Duration
+	trashPurger     TrashPurger
+	purgeError      func()
 	tmpl            *template.Template
 	mu              sync.RWMutex
 	sessions        map[string]session
@@ -121,12 +153,25 @@ func NewApp(d Dependencies) *App {
 		supabaseURL:     d.SupabaseURL,
 		supabaseAnonKey: d.SupabaseAnonKey,
 		idleTimeout:     idleTimeout,
+		trashPurger:     d.TrashPurger,
+		purgeError:      d.PurgeError,
 		tmpl: template.Must(template.New("pages").Funcs(template.FuncMap{
 			"lower": strings.ToLower,
 		}).ParseGlob(templatesGlob())),
 		sessions: map[string]session{},
 	}
 	go a.sweepIdleVaults(sweepInterval)
+	if a.trashPurger != nil {
+		purgeInterval := d.TrashPurgeInterval
+		if purgeInterval <= 0 {
+			purgeInterval = time.Hour
+		}
+		purgeContext := d.PurgeContext
+		if purgeContext == nil {
+			purgeContext = context.Background()
+		}
+		go a.purgeExpiredTrashLoop(purgeContext, purgeInterval)
+	}
 	return a
 }
 
@@ -170,6 +215,32 @@ func (a *App) closeIdleVaults() {
 		a.mu.Unlock()
 	}
 }
+
+func (a *App) purgeExpiredTrashLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.purgeExpiredTrash(ctx)
+		}
+	}
+}
+
+// purgeExpiredTrash runs with a per-invocation bound so a slow Supabase call
+// cannot stall future ticks or any browser request handler.
+func (a *App) purgeExpiredTrash(parent context.Context) {
+	if a.trashPurger == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if err := a.trashPurger.PurgeExpiredTrash(ctx); err != nil && a.purgeError != nil {
+		a.purgeError()
+	}
+}
 func (a *App) CreateSession(userID string) *http.Cookie { return a.createSession(userID, "") }
 func (a *App) createSession(userID, accessToken string) *http.Cookie {
 	id := randomToken()
@@ -204,6 +275,16 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.uploadVault(w, r)
 	case r.Method == "POST" && r.URL.Path == "/vaults/create":
 		a.createVault(w, r)
+	case r.Method == "POST" && r.URL.Path == "/vaults/rename":
+		a.renameVault(w, r)
+	case r.Method == "GET" && r.URL.Path == "/vaults/download":
+		a.downloadVault(w, r)
+	case r.Method == "POST" && r.URL.Path == "/vaults/delete":
+		a.trashVault(w, r)
+	case r.Method == "GET" && r.URL.Path == "/vaults/trash":
+		a.trashedVaults(w, r)
+	case r.Method == "POST" && r.URL.Path == "/vaults/restore":
+		a.restoreVault(w, r)
 	case r.Method == "POST" && r.URL.Path == "/vaults/select":
 		a.selectVault(w, r)
 	case r.Method == "GET" && r.URL.Path == "/vaults/unlock":
@@ -216,6 +297,12 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.updateEntry(w, r)
 	case r.Method == "POST" && r.URL.Path == "/vaults/entries/create":
 		a.createEntry(w, r)
+	case r.Method == "POST" && r.URL.Path == "/vaults/entries/delete":
+		a.trashEntry(w, r)
+	case r.Method == "GET" && r.URL.Path == "/vaults/entries/trash":
+		a.trashedEntries(w, r)
+	case r.Method == "POST" && r.URL.Path == "/vaults/entries/restore":
+		a.restoreEntry(w, r)
 	case r.Method == "POST" && r.URL.Path == "/vaults/close":
 		a.closeVault(w, r)
 	case r.Method == "GET" && r.URL.Path == "/session/status":
@@ -420,6 +507,91 @@ func (a *App) createVault(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/vaults", 303)
+}
+func (a *App) renameVault(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
+	vaultID, name := strings.TrimSpace(r.Form.Get("vault_id")), strings.TrimSpace(r.Form.Get("name"))
+	if vaultID == "" || name == "" || len(name) > 255 { http.Error(w, "Enter a vault name.", http.StatusBadRequest); return }
+	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil { http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError); return } else if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil { http.Error(w, "Vault rename is unavailable.", http.StatusServiceUnavailable); return }
+	if err := a.sessionVaults.RenameForSession(r.Context(), s.userID, s.accessToken, vaultID, name); err != nil { http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError); return }
+	if isHTMX(r) { a.vaultsPage(w, r); return }
+	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
+}
+func (a *App) downloadVault(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	vaultID := strings.TrimSpace(r.URL.Query().Get("vault_id"))
+	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	v, owned, err := a.vault(r.Context(), s, vaultID)
+	if err != nil { http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError); return }
+	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil { http.Error(w, "Vault download is unavailable.", http.StatusServiceUnavailable); return }
+	data, err := a.sessionVaults.DownloadActiveForSession(r.Context(), s.userID, s.accessToken, vaultID)
+	if err != nil { http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError); return }
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+downloadFilename(v.Name)+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(data)
+}
+func (a *App) trashVault(w http.ResponseWriter, r *http.Request) {
+	id, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
+	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
+	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil { http.Error(w, "Vault deletion is unavailable.", http.StatusServiceUnavailable); return }
+	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return } else if !owned {
+		trashed, listErr := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
+		if listErr != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return }
+		if containsVault(trashed, vaultID) { http.Redirect(w, r, "/vaults", http.StatusSeeOther); return }
+		http.Error(w, "Vault not found.", http.StatusNotFound); return
+	}
+	if err := a.sessionVaults.TrashVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return }
+	if s.activeVaultID == vaultID {
+		if err := a.closeActive(r.Context(), s); err != nil {
+			_ = a.sessionVaults.RestoreVaultForSession(r.Context(), s.userID, s.accessToken, vaultID)
+			http.Error(w, "Unable to close vault safely. Please try again.", http.StatusServiceUnavailable)
+			return
+		}
+		s.activeVaultID, s.activeHandle = "", ""
+		a.mu.Lock()
+		a.sessions[id] = s
+		a.mu.Unlock()
+	}
+	if isHTMX(r) { a.vaultsPage(w, r); return }
+	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
+}
+func (a *App) trashedVaults(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if a.sessionVaults == nil { http.Error(w, "Vault trash is unavailable.", http.StatusServiceUnavailable); return }
+	vaults, err := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
+	if err != nil { http.Error(w, "Unable to load vault trash. Please try again.", http.StatusInternalServerError); return }
+	type vaultTombstone struct { ID string `json:"id"`; Name string `json:"name"`; TrashedAt *time.Time `json:"trashed_at"`; PurgeAfter *time.Time `json:"purge_after"` }
+	out := make([]vaultTombstone, len(vaults))
+	for i, v := range vaults { out[i] = vaultTombstone{ID: v.ID, Name: v.Name, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter} }
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(out)
+}
+func (a *App) restoreVault(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
+	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
+	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil { http.Error(w, "Vault restore is unavailable.", http.StatusServiceUnavailable); return }
+	trashed, err := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
+	if err != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return }
+	if !containsVault(trashed, vaultID) {
+		if _, owned, activeErr := a.vault(r.Context(), s, vaultID); activeErr != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return } else if owned { http.Redirect(w, r, "/vaults", http.StatusSeeOther); return }
+		http.Error(w, "Vault not found.", http.StatusNotFound); return
+	}
+	if err := a.sessionVaults.RestoreVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return }
+	if isHTMX(r) { a.vaultsPage(w, r); return }
+	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 }
 func (a *App) selectVault(w http.ResponseWriter, r *http.Request) {
 	id, s, ok := a.authenticated(r)
@@ -640,6 +812,129 @@ func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
 	if err := a.syncDecodedEntries(r.Context(), s, s.activeHandle); err != nil { http.Error(w, "Vault saved but the decoded mirror could not be refreshed.", 502); return }
 	http.Redirect(w, r, "/vaults/browse", 303)
 }
+func (a *App) trashEntry(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !a.parseEntryMultipart(w, r, s) { return }
+	entryID := strings.TrimSpace(r.Form.Get("entry_id"))
+	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" { http.Error(w, "Unlock a vault and select an entry before deleting it.", http.StatusBadRequest); return }
+	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
+	if err != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
+	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil || a.rust == nil { http.Error(w, "Entry deletion is unavailable.", http.StatusServiceUnavailable); return }
+	masterPassword, keyfileB64, ok := entryCredentials(w, r)
+	if !ok { return }
+	activeEntries, err := a.sessionVaults.DecodedEntries(r.Context(), s.userID, s.accessToken, s.activeVaultID)
+	if err != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
+	if _, found := findEntry(activeEntries, entryID); !found {
+		trashedEntries, listErr := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
+		if listErr != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
+		if _, trashed := findEntry(trashedEntries, entryID); trashed { http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther); return }
+		http.Error(w, "Entry not found.", http.StatusNotFound); return
+	}
+	deleted, err := a.rust.DeleteEntry(r.Context(), privateclient.DeleteEntryRequest{HandleRequest: privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID}, EntryID: entryID, MasterPassword: masterPassword, KeyfileB64: keyfileB64})
+	if err != nil { http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity); return }
+	vaultBytes, ok := decodedVaultBytes(w, deleted.DatabaseB64)
+	if !ok { return }
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway); return }
+	if err := a.sessionVaults.TrashEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil { http.Error(w, "Vault saved but the entry could not be moved to trash.", http.StatusBadGateway); return }
+	http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
+}
+func (a *App) trashedEntries(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if s.activeVaultID == "" { http.Error(w, "Select a vault before viewing entry trash.", http.StatusBadRequest); return }
+	if a.sessionVaults == nil { http.Error(w, "Entry trash is unavailable.", http.StatusServiceUnavailable); return }
+	entries, err := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
+	if err != nil { http.Error(w, "Unable to load entry trash. Please try again.", http.StatusInternalServerError); return }
+	type entryTombstone struct { EntryID string `json:"entry_id"`; Title string `json:"title"`; Username string `json:"username"`; TrashedAt *time.Time `json:"trashed_at"`; PurgeAfter *time.Time `json:"purge_after"` }
+	out := make([]entryTombstone, len(entries))
+	for i, e := range entries { out[i] = entryTombstone{EntryID: e.EntryID, Title: e.Title, Username: e.Username, TrashedAt: e.TrashedAt, PurgeAfter: e.PurgeAfter} }
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(out)
+}
+func (a *App) restoreEntry(w http.ResponseWriter, r *http.Request) {
+	_, s, ok := a.authenticated(r)
+	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !a.parseEntryMultipart(w, r, s) { return }
+	entryID := strings.TrimSpace(r.Form.Get("entry_id"))
+	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" { http.Error(w, "Unlock a vault and select an entry before restoring it.", http.StatusBadRequest); return }
+	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
+	if err != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
+	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if a.sessionVaults == nil || a.rust == nil { http.Error(w, "Entry restore is unavailable.", http.StatusServiceUnavailable); return }
+	masterPassword, keyfileB64, ok := entryCredentials(w, r)
+	if !ok { return }
+	entries, err := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
+	if err != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
+	entry, found := findEntry(entries, entryID)
+	if !found {
+		activeEntries, listErr := a.sessionVaults.DecodedEntries(r.Context(), s.userID, s.accessToken, s.activeVaultID)
+		if listErr != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
+		if _, active := findEntry(activeEntries, entryID); active { http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther); return }
+		http.Error(w, "Entry not found.", http.StatusNotFound); return
+	}
+	// The Rust service restores the KDBX tombstone itself. The browser-facing
+	// service must not send a decoded tombstone's secret fields back over this
+	// private request; only the original group preference and credentials are needed.
+	var groupID *string
+	if entry.GroupID != "" { groupID = &entry.GroupID }
+	restored, err := a.rust.RestoreEntry(r.Context(), privateclient.RestoreEntryRequest{HandleRequest: privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID}, EntryID: entryID, PreferredGroupID: groupID, MasterPassword: masterPassword, KeyfileB64: keyfileB64})
+	if err != nil { http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity); return }
+	vaultBytes, ok := decodedVaultBytes(w, restored.DatabaseB64)
+	if !ok { return }
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway); return }
+	if err := a.sessionVaults.RestoreEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil { http.Error(w, "Vault saved but the entry could not be restored from trash.", http.StatusBadGateway); return }
+	http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
+}
+func (a *App) parseEntryMultipart(w http.ResponseWriter, r *http.Request, s session) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxKeyFileBytes+(1<<20))
+	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil { http.Error(w, "Invalid save form.", http.StatusBadRequest); return false }
+	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return false }
+	return true
+}
+func entryCredentials(w http.ResponseWriter, r *http.Request) (*string, *string, bool) {
+	password := r.Form.Get("master_password")
+	if password == "" { http.Error(w, "Enter the master password to change this entry.", http.StatusBadRequest); return nil, nil, false }
+	var keyfileB64 *string
+	if file, _, err := r.FormFile("key_file"); err == nil {
+		defer file.Close()
+		raw, readErr := io.ReadAll(io.LimitReader(file, maxKeyFileBytes+1))
+		if readErr != nil || len(raw) > maxKeyFileBytes { http.Error(w, "Key file is too large.", http.StatusBadRequest); return nil, nil, false }
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		keyfileB64 = &encoded
+	}
+	return &password, keyfileB64, true
+}
+func decodedVaultBytes(w http.ResponseWriter, encoded string) ([]byte, bool) {
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(data) == 0 || len(data) > maxVaultBytes { http.Error(w, "Unable to save the vault.", http.StatusInternalServerError); return nil, false }
+	return data, true
+}
+func containsVault(vaults []Vault, id string) bool {
+	for _, vault := range vaults { if vault.ID == id { return true } }
+	return false
+}
+func findEntry(entries []DecodedEntry, id string) (DecodedEntry, bool) {
+	for _, entry := range entries { if entry.EntryID == id { return entry, true } }
+	return DecodedEntry{}, false
+}
+func downloadFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if strings.HasSuffix(strings.ToLower(name), ".kdbx") { name = name[:len(name)-len(".kdbx")] }
+	var safe strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == ' ', r == '.', r == '-', r == '_':
+			safe.WriteRune(r)
+		case r == '/', r == '\\':
+			safe.WriteByte('_')
+		}
+	}
+	name = strings.Trim(safe.String(), " .")
+	if name == "" { name = "vault" }
+	return name + ".kdbx"
+}
 func (a *App) closeVault(w http.ResponseWriter, r *http.Request) {
 	id, s, ok := a.authenticated(r)
 	if !ok {
@@ -807,13 +1102,16 @@ func (s SupabaseVaults) UploadForSession(c context.Context, u, t, n, id string, 
 func (s SupabaseVaults) DownloadForSession(c context.Context, u, t string, v Vault) ([]byte, error) {
 	return s.Client.Download(c, t, v.ObjectPath)
 }
+func (s SupabaseVaults) DownloadActiveForSession(c context.Context, u, t, vaultID string) ([]byte, error) {
+	return s.Client.DownloadActive(c, t, u, vaultID)
+}
 func (s SupabaseVaults) ReplaceForSession(c context.Context, u, t string, v Vault, data []byte) error {
 	return s.Client.Replace(c, t, v.ObjectPath, data)
 }
 func (s SupabaseVaults) ReplaceDecodedEntries(c context.Context, u, t, vaultID string, entries []DecodedEntry) error {
 	rows := make([]supabase.DecodedEntry, len(entries))
 	for i, entry := range entries {
-		rows[i] = supabase.DecodedEntry{EntryID: entry.EntryID, GroupID: entry.GroupID, Title: entry.Title, Username: entry.Username, Password: entry.Password, URL: entry.URL, Notes: entry.Notes, Fields: entry.Fields}
+		rows[i] = supabase.DecodedEntry{EntryID: entry.EntryID, GroupID: entry.GroupID, Title: entry.Title, Username: entry.Username, Password: entry.Password, URL: entry.URL, Notes: entry.Notes, Fields: entry.Fields, TrashedAt: entry.TrashedAt, PurgeAfter: entry.PurgeAfter}
 	}
 	return s.Client.ReplaceDecodedEntries(c, t, u, vaultID, rows)
 }
@@ -822,12 +1120,40 @@ func (s SupabaseVaults) DecodedEntries(c context.Context, u, t, vaultID string) 
 	if err != nil { return nil, err }
 	entries := make([]DecodedEntry, len(rows))
 	for i, row := range rows {
-		entries[i] = DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields}
+		entries[i] = DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields, TrashedAt: row.TrashedAt, PurgeAfter: row.PurgeAfter}
 	}
 	return entries, nil
 }
 func (s SupabaseVaults) UpdateDecodedEntry(c context.Context, u, t, vaultID, entryID string, entry DecodedEntry) error {
 	return s.Client.UpdateDecodedEntry(c, t, u, vaultID, entryID, supabase.DecodedEntry{GroupID: entry.GroupID, Title: entry.Title, Username: entry.Username, Password: entry.Password, URL: entry.URL, Notes: entry.Notes, Fields: entry.Fields})
+}
+func (s SupabaseVaults) RenameForSession(c context.Context, u, t, vaultID, name string) error {
+	return s.Client.Rename(c, t, u, vaultID, name)
+}
+func (s SupabaseVaults) TrashVaultForSession(c context.Context, u, t, vaultID string) error {
+	return s.Client.TrashVault(c, t, u, vaultID)
+}
+func (s SupabaseVaults) RestoreVaultForSession(c context.Context, u, t, vaultID string) error {
+	return s.Client.RestoreVault(c, t, u, vaultID)
+}
+func (s SupabaseVaults) TrashedVaultsForSession(c context.Context, u, t string) ([]Vault, error) {
+	vaults, err := s.Client.ListTrashedVaults(c, t, u)
+	return fromSupabase(vaults), err
+}
+func (s SupabaseVaults) TrashEntryForSession(c context.Context, u, t, vaultID, entryID string) error {
+	return s.Client.TrashEntry(c, t, u, vaultID, entryID)
+}
+func (s SupabaseVaults) RestoreEntryForSession(c context.Context, u, t, vaultID, entryID string) error {
+	return s.Client.RestoreEntry(c, t, u, vaultID, entryID)
+}
+func (s SupabaseVaults) TrashedEntriesForSession(c context.Context, u, t, vaultID string) ([]DecodedEntry, error) {
+	rows, err := s.Client.ListTrashedEntries(c, t, u, vaultID)
+	if err != nil { return nil, err }
+	entries := make([]DecodedEntry, len(rows))
+	for i, row := range rows {
+		entries[i] = DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields, TrashedAt: row.TrashedAt, PurgeAfter: row.PurgeAfter}
+	}
+	return entries, nil
 }
 func fromSupabase(vs []supabase.Vault) []Vault {
 	out := make([]Vault, len(vs))
@@ -836,6 +1162,6 @@ func fromSupabase(vs []supabase.Vault) []Vault {
 	}
 	return out
 }
-func fromOne(v supabase.Vault) Vault { return Vault{ID: v.ID, Name: v.Name, ObjectPath: v.ObjectPath} }
+func fromOne(v supabase.Vault) Vault { return Vault{ID: v.ID, Name: v.Name, ObjectPath: v.ObjectPath, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter} }
 
 var _ = json.RawMessage{}

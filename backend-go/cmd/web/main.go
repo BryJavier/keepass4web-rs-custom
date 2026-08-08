@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"io"
@@ -18,6 +19,17 @@ import (
 )
 
 type Config = config.Config
+
+// serviceRoleTrashPurger keeps the Supabase service-role credential at the
+// composition root. The web package receives only its narrow purge ability.
+type serviceRoleTrashPurger struct {
+	client         *supabase.VaultClient
+	serviceRoleKey string
+}
+
+func (p serviceRoleTrashPurger) PurgeExpiredTrash(ctx context.Context) error {
+	return p.client.PurgeExpiredTrash(ctx, p.serviceRoleKey)
+}
 
 func loadConfig(getenv func(string) string) (Config, error) {
 	return config.Load(getenv)
@@ -84,9 +96,30 @@ func runWithLogger(getenv func(string) string, logger *slog.Logger, serve func(C
 	if err != nil { return err }
 	vaults, err := supabase.NewVaultClient(configuration.SupabaseServerURL, configuration.SupabaseAnonKey, nil)
 	if err != nil { return err }
+	var trashPurger web.TrashPurger
+	if configuration.SupabaseServiceRoleKey != "" {
+		serverVaults, err := supabase.NewVaultClient(configuration.SupabaseServerURL, configuration.SupabaseServiceRoleKey, nil)
+		if err != nil { return err }
+		trashPurger = serviceRoleTrashPurger{client: serverVaults, serviceRoleKey: configuration.SupabaseServiceRoleKey}
+	}
 	rust, err := privateclient.New(configuration.RustServiceURL, configuration.RustServiceToken, nil)
 	if err != nil { return err }
-	return serve(configuration, newHandlerWithDependencies(logger, web.Dependencies{Auth: auth, SessionVaults: web.SupabaseVaults{Client: vaults}, Rust: rust, SecureCookies: configuration.Environment != "test" && configuration.Environment != "development", SupabaseURL: configuration.SupabaseURL, SupabaseAnonKey: configuration.SupabaseAnonKey}))
+	return serve(configuration, newHandlerWithDependencies(logger, web.Dependencies{
+		Auth:               auth,
+		SessionVaults:      web.SupabaseVaults{Client: vaults},
+		Rust:               rust,
+		SecureCookies:      configuration.Environment != "test" && configuration.Environment != "development",
+		SupabaseURL:        configuration.SupabaseURL,
+		SupabaseAnonKey:    configuration.SupabaseAnonKey,
+		TrashPurger:        trashPurger,
+		TrashPurgeInterval: configuration.VaultTrashPurgeInterval,
+		PurgeError: func() {
+			observability.LogEvent(logger, slog.LevelError, "server_error", map[string]any{
+				"event":          "server_error",
+				"correlation_id": newCorrelationID(),
+			})
+		},
+	}))
 }
 
 func writePublicError(writer http.ResponseWriter, logger *slog.Logger, correlationID string) {

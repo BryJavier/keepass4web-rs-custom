@@ -63,6 +63,10 @@ pub struct EntryUpdate {
     pub notes: String,
 }
 
+// Deleted entries remain as native KDBX entries, so all protected and custom
+// fields survive recovery. This group is intentionally omitted from normal
+// browsing and search results.
+const TOMBSTONE_GROUP_NAME: &str = ".keepass4web-tombstones";
 
 impl KeePass {
     /// Opens a KDBX payload supplied by the trusted private service caller.
@@ -267,6 +271,9 @@ impl KeePass {
 
     pub fn get_group_entries_by_id(&self, group_id: Uuid) -> Result<EntryGroup> {
         let group = Self::find_group_by_id(&self.db.root, &group_id).ok_or(anyhow!("group not found"))?;
+        if Self::is_tombstone_group(group) {
+            bail!("group not found");
+        }
 
         let mut entries = Vec::with_capacity(group.children.len());
         for node in &group.children {
@@ -316,6 +323,31 @@ impl KeePass {
         entry.fields.insert("URL".to_owned(), Value::Unprotected(update.url));
         entry.fields.insert("Notes".to_owned(), Value::Unprotected(update.notes));
         entry.fields.insert("Password".to_owned(), Value::Protected(SecStr::new(update.password.into_bytes())));
+        Ok(())
+    }
+
+    /// Moves the existing KDBX entry into the tombstone group and returns its
+    /// original group UUID. Moving rather than recreating preserves the UUID,
+    /// fields, protected values, binaries, and other native metadata.
+    pub fn delete_entry(&mut self, entry_id: Uuid) -> Result<Uuid> {
+        let (entry, original_group_id) = Self::take_active_entry(&mut self.db.root, &entry_id)
+            .ok_or_else(|| anyhow!("entry not found"))?;
+        Self::tombstone_group_mut(&mut self.db.root).add_child(entry);
+        Ok(original_group_id)
+    }
+
+    /// Restores a tombstoned KDBX entry. If its preferred group no longer
+    /// exists, restore directly into the root group instead.
+    pub fn restore_entry(&mut self, entry_id: Uuid, preferred_group_id: Option<Uuid>) -> Result<()> {
+        let entry = Self::take_tombstoned_entry(&mut self.db.root, &entry_id)
+            .ok_or_else(|| anyhow!("tombstoned entry not found"))?;
+        let mut entry = Some(entry);
+        let restored_to_preferred_group = preferred_group_id.map(|group_id| {
+            Self::add_entry_to_active_group(&mut self.db.root, &group_id, &mut entry)
+        }).unwrap_or(false);
+        if !restored_to_preferred_group {
+            self.db.root.add_child(entry.expect("entry must not be consumed before restoration"));
+        }
         Ok(())
     }
 
@@ -388,7 +420,9 @@ impl KeePass {
         let mut children: Vec<Group> = Vec::with_capacity(group.children.len());
         for node in &group.children {
             if let Node::Group(group) = node {
-                children.push(Self::find_all_groups(group));
+                if !Self::is_tombstone_group(group) {
+                    children.push(Self::find_all_groups(group));
+                }
             }
         }
         Group {
@@ -435,9 +469,11 @@ impl KeePass {
         for node in &group.children {
             match node {
                 Node::Group(group) => {
-                    let found = Self::find_entry_by_id(group, id);
-                    if found.is_some() {
-                        return found;
+                    if !Self::is_tombstone_group(group) {
+                        let found = Self::find_entry_by_id(group, id);
+                        if found.is_some() {
+                            return found;
+                        }
                     }
                 }
                 Node::Entry(entry) => {
@@ -454,8 +490,9 @@ impl KeePass {
     fn find_entry_by_id_mut<'a>(group: &'a mut keepass::db::Group, id: &Uuid) -> Option<&'a mut keepass::db::Entry> {
         for node in &mut group.children {
             match node {
-                Node::Group(group) => if let Some(entry) = Self::find_entry_by_id_mut(group, id) { return Some(entry) },
+                Node::Group(group) if !Self::is_tombstone_group(group) => if let Some(entry) = Self::find_entry_by_id_mut(group, id) { return Some(entry) },
                 Node::Entry(entry) => if &entry.uuid == id { return Some(entry) },
+                Node::Group(_) => {},
             }
         }
         None
@@ -467,7 +504,9 @@ impl KeePass {
         for node in &group.children {
             match node {
                 Node::Group(group) => {
-                    entries.append(&mut Self::find_entries_by_string(group, term, config));
+                    if !Self::is_tombstone_group(group) {
+                        entries.append(&mut Self::find_entries_by_string(group, term, config));
+                    }
                 }
                 Node::Entry(entry) => {
                     let entry: Entry = entry.into();
@@ -479,6 +518,73 @@ impl KeePass {
         }
 
         entries
+    }
+
+    fn is_tombstone_group(group: &keepass::db::Group) -> bool {
+        group.name == TOMBSTONE_GROUP_NAME
+    }
+
+    fn tombstone_group_mut(root: &mut keepass::db::Group) -> &mut keepass::db::Group {
+        let index = root.children.iter().position(|node| {
+            matches!(node, Node::Group(group) if Self::is_tombstone_group(group))
+        }).unwrap_or_else(|| {
+            root.add_child(DbGroup::new(TOMBSTONE_GROUP_NAME));
+            root.children.len() - 1
+        });
+        match root.children.get_mut(index) {
+            Some(Node::Group(group)) => group,
+            _ => unreachable!("tombstone group must be a group node"),
+        }
+    }
+
+    fn take_active_entry(group: &mut keepass::db::Group, id: &Uuid) -> Option<(keepass::db::Entry, Uuid)> {
+        if let Some(index) = group.children.iter().position(|node| {
+            matches!(node, Node::Entry(entry) if &entry.uuid == id)
+        }) {
+            let Node::Entry(entry) = group.children.remove(index) else {
+                unreachable!("entry position must refer to an entry node");
+            };
+            return Some((entry, group.uuid));
+        }
+        for node in &mut group.children {
+            if let Node::Group(child) = node {
+                if !Self::is_tombstone_group(child) {
+                    if let Some(entry) = Self::take_active_entry(child, id) {
+                        return Some(entry);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn take_tombstoned_entry(root: &mut keepass::db::Group, id: &Uuid) -> Option<keepass::db::Entry> {
+        let tombstone_group = root.children.iter_mut().find_map(|node| match node {
+            Node::Group(group) if Self::is_tombstone_group(group) => Some(group),
+            _ => None,
+        })?;
+        let index = tombstone_group.children.iter().position(|node| {
+            matches!(node, Node::Entry(entry) if &entry.uuid == id)
+        })?;
+        let Node::Entry(entry) = tombstone_group.children.remove(index) else {
+            unreachable!("tombstone entry position must refer to an entry node");
+        };
+        Some(entry)
+    }
+
+    fn add_entry_to_active_group(group: &mut keepass::db::Group, id: &Uuid, entry: &mut Option<keepass::db::Entry>) -> bool {
+        if &group.uuid == id && !Self::is_tombstone_group(group) {
+            group.add_child(entry.take().expect("entry must be available for restoration"));
+            return true;
+        }
+        for node in &mut group.children {
+            if let Node::Group(child) = node {
+                if !Self::is_tombstone_group(child) && Self::add_entry_to_active_group(child, id, entry) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -649,5 +755,67 @@ mod tests {
             title: "x".to_owned(), username: "x".to_owned(), password: "x".to_owned(), url: "x".to_owned(), notes: "x".to_owned(),
         });
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn deleted_entry_remains_tombstoned_after_kdbx_roundtrip() {
+        let config = Config::default();
+        let mut database = KeePass::new_empty(&config);
+        let entry_id = database.create_entry(None, EntryUpdate {
+            title: "Recover me".to_owned(), username: "alice".to_owned(), password: "hunter2".to_owned(),
+            url: "https://example.test".to_owned(), notes: "custom fields must survive".to_owned(),
+        }).unwrap();
+
+        let original_group_id = database.delete_entry(entry_id).unwrap();
+        assert!(database.get_entry_by_id(entry_id).is_err());
+
+        let bytes = database.to_kdbx_bytes(Some(Zeroizing::new("test".to_owned())), None).unwrap();
+        let mut reopened = KeePass::from_bytes(&config, bytes, Some(Zeroizing::new("test".to_owned())), None).await.unwrap();
+        reopened.restore_entry(entry_id, Some(original_group_id)).unwrap();
+
+        let restored = reopened.get_entry_by_id(entry_id).unwrap();
+        assert_eq!(restored.id, entry_id);
+        assert_eq!(restored.title.as_deref(), Some("Recover me"));
+        assert_eq!(restored.notes.as_deref(), Some("custom fields must survive"));
+    }
+
+    #[tokio::test]
+    async fn restored_entry_keeps_its_original_uuid_and_custom_fields() {
+        let config = Config::default();
+        let mut database = KeePass::new_empty(&config);
+        let entry_id = database.create_entry(None, EntryUpdate {
+            title: "Recover me".to_owned(), username: "alice".to_owned(), password: "hunter2".to_owned(),
+            url: "https://example.test".to_owned(), notes: "note".to_owned(),
+        }).unwrap();
+        let entry = KeePass::find_entry_by_id_mut(&mut database.db.root, &entry_id).unwrap();
+        entry.fields.insert("Favourite colour".to_owned(), Value::Unprotected("green".to_owned()));
+
+        let original_group_id = database.delete_entry(entry_id).unwrap();
+        let bytes = database.to_kdbx_bytes(Some(Zeroizing::new("test".to_owned())), None).unwrap();
+        let mut reopened = KeePass::from_bytes(&config, bytes, Some(Zeroizing::new("test".to_owned())), None).await.unwrap();
+        reopened.restore_entry(entry_id, Some(original_group_id)).unwrap();
+
+        let restored = KeePass::find_entry_by_id(&reopened.db.root, &entry_id).unwrap();
+        assert_eq!(restored.uuid, entry_id);
+        assert!(matches!(restored.fields.get("Favourite colour"), Some(Value::Unprotected(value)) if value == "green"));
+    }
+
+    #[tokio::test]
+    async fn restoring_to_a_missing_preferred_group_falls_back_to_root() {
+        let config = Config::default();
+        let mut database = KeePass::new_empty(&config);
+        let preferred_group = DbGroup::new("Preferred");
+        let preferred_group_id = preferred_group.uuid;
+        database.db.root.add_child(preferred_group);
+        let entry_id = database.create_entry(Some(preferred_group_id), EntryUpdate {
+            title: "Recover me".to_owned(), username: "alice".to_owned(), password: "hunter2".to_owned(),
+            url: "https://example.test".to_owned(), notes: "note".to_owned(),
+        }).unwrap();
+
+        database.delete_entry(entry_id).unwrap();
+        database.db.root.children.retain(|node| !matches!(node, Node::Group(group) if group.uuid == preferred_group_id));
+        database.restore_entry(entry_id, Some(preferred_group_id)).unwrap();
+
+        assert!(database.db.root.children.iter().any(|node| matches!(node, Node::Entry(entry) if entry.uuid == entry_id)));
     }
 }

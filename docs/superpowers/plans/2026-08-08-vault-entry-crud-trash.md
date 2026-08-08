@@ -273,3 +273,7 @@ git commit -m "feat(go): purge expired vault and entry trash"
 - Coverage includes vault list/create/read/download/rename/delete/restore, entry browse/create/update/delete/restore, retention, purge, security, and contract.
 - Interfaces are ordered: database lifecycle → repository → KDBX → private client → HTTP → purge worker.
 - Storage replacement precedes mirror lifecycle changes; only the purge worker receives the service-role capability.
+
+## Corrective implementation gate
+
+Before continuing the existing code changes, replace the name-based KDBX tombstone design with the approved state-machine design. Add a migration for vault/entry lifecycle states and vault revision; use an atomic database claim for `trashed → purging`; require expected revision when replacing a KDBX; persist entry snapshots and transitional states before mutation; invalidate all vault handles on vault trash; enforce active-parent reads; and add server-only Compose/runtime wiring for `SUPABASE_SERVICE_ROLE_KEY`. Do not merge the current draft implementation until these changes and their failure-injection tests pass.

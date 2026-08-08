@@ -98,3 +98,12 @@ Success: `303 /vaults/browse`. Failures: `400` no unlocked vault, `403`, `404` u
 
 The backend purges resources once `purge_after` passes. On restore `404`, the UI must remove the item from local trash state and show that the recovery period expired. There is intentionally no empty-trash or delete-now browser action.
 
+## Corrective lifecycle revision
+
+The implementation uses server-managed lifecycle states rather than a hidden KDBX tombstone group.
+
+- Entry operations may return `409 Conflict` with a retryable transition state when another mutation is in progress or the vault revision is stale. The UI must refresh state rather than resubmit secrets automatically.
+- `GET /vaults/browse` and entry trash routes return no data when the parent vault is not `active`; stale sessions receive the normal unlock/list redirect or `404`.
+- A restore request contains only `csrf_token`, `entry_id`, `master_password`, and optional `key_file`. The browser never resends title, username, password, URL, notes, or recovery payload.
+- A vault marked `purging` cannot be restored. It may remain visible in trash as “permanent deletion in progress” only if the server explicitly returns that state; otherwise treat `404` as expired.
+

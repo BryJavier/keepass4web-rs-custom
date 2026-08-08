@@ -329,6 +329,47 @@ impl PrivateVaultService {
             Ok(CreateEntryResponse { entry_id, database_b64: general_purpose::STANDARD.encode(bytes.as_slice()) })
         }).await
     }
+
+    pub async fn delete_entry(&self, request: DeleteEntryRequest) -> Result<DeleteEntryResponse> {
+        let mut password = request.master_password.map(Zeroizing::new);
+        let mut keyfile = match request.keyfile_b64 {
+            Some(mut encoded) => {
+                let decoded = general_purpose::STANDARD.decode(&encoded);
+                encoded.zeroize();
+                Some(Zeroizing::new(decoded?.into_boxed_slice()))
+            }
+            None => None,
+        };
+        self.with_vault_mut(&request.handle, move |database| {
+            let group_id = database.delete_entry(request.entry_id)?;
+            let bytes = database.to_kdbx_bytes(password.take(), keyfile.take())?;
+            Ok(DeleteEntryResponse {
+                entry_id: request.entry_id,
+                group_id,
+                database_b64: general_purpose::STANDARD.encode(bytes.as_slice()),
+            })
+        }).await
+    }
+
+    pub async fn restore_entry(&self, request: RestoreEntryRequest) -> Result<RestoreEntryResponse> {
+        let mut password = request.master_password.map(Zeroizing::new);
+        let mut keyfile = match request.keyfile_b64 {
+            Some(mut encoded) => {
+                let decoded = general_purpose::STANDARD.decode(&encoded);
+                encoded.zeroize();
+                Some(Zeroizing::new(decoded?.into_boxed_slice()))
+            }
+            None => None,
+        };
+        self.with_vault_mut(&request.handle, move |database| {
+            database.restore_entry(request.entry_id, request.preferred_group_id)?;
+            let bytes = database.to_kdbx_bytes(password.take(), keyfile.take())?;
+            Ok(RestoreEntryResponse {
+                entry_id: request.entry_id,
+                database_b64: general_purpose::STANDARD.encode(bytes.as_slice()),
+            })
+        }).await
+    }
 }
 
 #[derive(Deserialize)]
@@ -379,6 +420,22 @@ pub struct CreateEntryRequest {
     pub master_password: Option<String>,
     pub keyfile_b64: Option<String>,
 }
+#[derive(Deserialize)]
+pub struct DeleteEntryRequest {
+    #[serde(flatten)] pub handle: HandleRequest,
+    pub entry_id: Uuid,
+    pub master_password: Option<String>,
+    pub keyfile_b64: Option<String>,
+}
+#[derive(Deserialize)]
+pub struct RestoreEntryRequest {
+    #[serde(flatten)] pub handle: HandleRequest,
+    pub entry_id: Uuid,
+    #[serde(alias = "group_id")]
+    pub preferred_group_id: Option<Uuid>,
+    pub master_password: Option<String>,
+    pub keyfile_b64: Option<String>,
+}
 
 #[derive(Serialize)]
 pub struct UnlockResponse { pub handle: String, pub expires_in_seconds: u64 }
@@ -392,6 +449,10 @@ pub struct UpdateResponse { pub database_b64: String }
 pub struct CreateVaultResponse { pub database_b64: String }
 #[derive(Serialize)]
 pub struct CreateEntryResponse { pub entry_id: Uuid, pub database_b64: String }
+#[derive(Serialize)]
+pub struct DeleteEntryResponse { pub entry_id: Uuid, pub group_id: Uuid, pub database_b64: String }
+#[derive(Serialize)]
+pub struct RestoreEntryResponse { pub entry_id: Uuid, pub database_b64: String }
 
 fn authenticated(request: &HttpRequest, credential: &ServiceCredential) -> bool {
     credential.verify_bearer(request.headers().get("Authorization").and_then(|value| value.to_str().ok())).is_ok()
@@ -468,6 +529,18 @@ async fn create_entry_route(request: HttpRequest, credential: web::Data<ServiceC
     match service.create_entry(body.into_inner()).await { Ok(value) => HttpResponse::Ok().insert_header(("X-Correlation-ID", observability::correlation_id(&request))).json(value), Err(_) => private_error(&request, actix_web::http::StatusCode::BAD_REQUEST) }
 }
 
+#[post("/entries/delete")]
+async fn delete_entry_route(request: HttpRequest, credential: web::Data<ServiceCredential>, service: web::Data<PrivateVaultService>, body: web::Json<DeleteEntryRequest>) -> impl Responder {
+    if !authenticated(&request, &credential) { return private_error(&request, actix_web::http::StatusCode::UNAUTHORIZED); }
+    match service.delete_entry(body.into_inner()).await { Ok(value) => HttpResponse::Ok().insert_header(("X-Correlation-ID", observability::correlation_id(&request))).json(value), Err(_) => private_error(&request, actix_web::http::StatusCode::BAD_REQUEST) }
+}
+
+#[post("/entries/restore")]
+async fn restore_entry_route(request: HttpRequest, credential: web::Data<ServiceCredential>, service: web::Data<PrivateVaultService>, body: web::Json<RestoreEntryRequest>) -> impl Responder {
+    if !authenticated(&request, &credential) { return private_error(&request, actix_web::http::StatusCode::UNAUTHORIZED); }
+    match service.restore_entry(body.into_inner()).await { Ok(value) => HttpResponse::Ok().insert_header(("X-Correlation-ID", observability::correlation_id(&request))).json(value), Err(_) => private_error(&request, actix_web::http::StatusCode::BAD_REQUEST) }
+}
+
 pub async fn run_private_service(config: PrivateServiceConfig, vault_config: Config) -> std::io::Result<()> {
     let credential = web::Data::new(config.credential);
     let service = web::Data::new(PrivateVaultService::new(vault_config));
@@ -493,7 +566,8 @@ pub async fn run_private_service(config: PrivateServiceConfig, vault_config: Con
         .service(web::scope("/internal/v1")
             .service(unlock).service(groups).service(entries).service(entry).service(update)
             .service(search).service(reveal).service(close)
-            .service(create_vault_route).service(create_entry_route)))
+            .service(create_vault_route).service(create_entry_route)
+            .service(delete_entry_route).service(restore_entry_route)))
         .bind(config.bind)?
         .run().await
 }
@@ -676,5 +750,27 @@ mod tests {
 
         assert!(!result.entry_id.is_nil());
         assert!(!result.database_b64.is_empty());
+    }
+
+    // Deletion is a mutation, so it must enforce the same handle binding as
+    // every other vault operation before touching either KDBX or credentials.
+    #[tokio::test]
+    async fn delete_entry_rejects_a_handle_owned_by_another_user() {
+        let service = super::PrivateVaultService::new(crate::config::config::Config::default());
+        let created = service.create_vault(super::CreateVaultRequest { password: Some("test".to_owned()), keyfile_b64: None }).await.unwrap();
+        let owner = Uuid::new_v4();
+        let vault_id = Uuid::new_v4();
+        let unlocked = service.unlock(super::UnlockRequest {
+            user_id: owner, vault_id, database_b64: created.database_b64, password: Some("test".to_owned()), keyfile_b64: None,
+        }).await.unwrap();
+
+        let result = service.delete_entry(super::DeleteEntryRequest {
+            handle: super::HandleRequest { handle: unlocked.handle, user_id: Uuid::new_v4(), vault_id },
+            entry_id: Uuid::new_v4(),
+            master_password: Some("test".to_owned()),
+            keyfile_b64: None,
+        }).await;
+
+        assert!(result.is_err());
     }
 }

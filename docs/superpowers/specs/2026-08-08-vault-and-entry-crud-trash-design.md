@@ -106,3 +106,27 @@ closure, private-client contracts, Rust KDBX deletion/restoration and root
 fallback, idempotency, retry behavior, the 30-day boundary, and redaction.
 End-to-end coverage exercises vault and entry delete/restore through the
 server-rendered HTTP layer without adding UI work.
+
+## Revision: transactional trash lifecycle
+
+This revision supersedes the earlier KDBX tombstone-group approach.
+
+### Entries
+
+Recoverable entry data remains in the owner-only `decoded_vault_entries` row; no hidden group is created in the KDBX. Add a lifecycle state (`active`, `deleting`, `trashed`, `restoring`) and a vault revision. An entry delete first records a recovery snapshot and moves the row to `deleting`, then removes/re-encrypts/replaces the KDBX using the expected revision, and finally marks the row `trashed`. Restore follows the reverse state sequence and recreates the entry from the row payload in its original group or root fallback.
+
+A failed downstream step leaves a retryable transitional state; active and trash views exclude transitional rows. KDBX replacement must invalidate the current Rust handle or atomically refresh it so a failed/old handle cannot write stale bytes.
+
+### Vaults
+
+Vaults use `active`, `trashed`, and `purging` lifecycle states. The scheduled worker atomically claims an expired trashed vault as `purging` before any Storage call. Restore works only from `trashed`; a `purging` vault is no longer recoverable. Storage deletion happens before final metadata deletion; retries resume the `purging` operation safely.
+
+Trashing a vault invalidates every active in-memory handle for that vault, and browse/read queries verify the parent vault is active before returning decoded fields.
+
+### Server-only purge credential
+
+`SUPABASE_SERVICE_ROLE_KEY` is injected solely into the Go web service's server-side runtime configuration and Compose environment. It is never rendered in page data, browser configuration, logs, or client JavaScript.
+
+### Verification additions
+
+Test state-transition retry/rollback, expected-revision conflicts, stale handle invalidation, purge-vs-restore claiming, parent-vault access filtering, and absence of secret fields in restore requests.

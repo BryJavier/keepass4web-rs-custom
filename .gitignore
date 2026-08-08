@@ -26,3 +26,6 @@ playwright-report/
 
 # jetbrains
 .idea
+
+# local isolated implementation worktrees
+.worktrees/

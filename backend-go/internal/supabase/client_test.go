@@ -106,18 +106,25 @@ func TestTrashVaultSetsRetentionOnlyForActiveVault(t *testing.T) {
 	if got := request.URL.Query().Get("trashed_at"); got != "is.null" {
 		t.Fatalf("trashed_at filter = %q, want is.null", got)
 	}
+	if got := request.URL.Query().Get("lifecycle_state"); got != "eq.active" {
+		t.Fatalf("lifecycle state filter = %q, want eq.active", got)
+	}
 	if got := request.URL.Query().Get("owner_id"); got != "eq."+ownerID {
 		t.Fatalf("owner filter = %q", got)
 	}
 	var lifecycle struct {
 		TrashedAt  time.Time `json:"trashed_at"`
 		PurgeAfter time.Time `json:"purge_after"`
+		State      string    `json:"lifecycle_state"`
 	}
 	if err := json.Unmarshal([]byte(httpClient.bodies[0]), &lifecycle); err != nil {
 		t.Fatal(err)
 	}
 	if lifecycle.TrashedAt.IsZero() || !lifecycle.PurgeAfter.Equal(lifecycle.TrashedAt.AddDate(0, 0, 30)) {
 		t.Fatalf("trash lifecycle = %+v, want exactly 30 days", lifecycle)
+	}
+	if lifecycle.State != "trashed" {
+		t.Fatalf("trash state = %q, want trashed", lifecycle.State)
 	}
 }
 
@@ -131,12 +138,18 @@ func TestRestoreVaultClearsLifecycleFields(t *testing.T) {
 	if got := request.URL.Query().Get("trashed_at"); got != "not.is.null" {
 		t.Fatalf("trashed_at filter = %q, want not.is.null", got)
 	}
+	if got := request.URL.Query().Get("lifecycle_state"); got != "eq.trashed" {
+		t.Fatalf("lifecycle state filter = %q, want eq.trashed", got)
+	}
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(httpClient.bodies[0]), &payload); err != nil {
 		t.Fatal(err)
 	}
 	if payload["trashed_at"] != nil || payload["purge_after"] != nil {
 		t.Fatalf("restore payload = %s, want both lifecycle fields null", httpClient.bodies[0])
+	}
+	if payload["lifecycle_state"] != "active" {
+		t.Fatalf("restore state = %v, want active", payload["lifecycle_state"])
 	}
 }
 
@@ -149,6 +162,9 @@ func TestListTrashedVaultsRequestsOnlyUnexpiredTrash(t *testing.T) {
 	query := httpClient.requests[0].URL.Query()
 	if got := query.Get("trashed_at"); got != "not.is.null" {
 		t.Fatalf("trashed_at filter = %q", got)
+	}
+	if got := query.Get("lifecycle_state"); got != "eq.trashed" {
+		t.Fatalf("lifecycle state filter = %q, want eq.trashed", got)
 	}
 	if got := query.Get("purge_after"); !strings.HasPrefix(got, "gt.") {
 		t.Fatalf("purge_after filter = %q, want future-only predicate", got)
@@ -164,22 +180,66 @@ func TestActiveDecodedEntriesExcludeTombstones(t *testing.T) {
 	if got := httpClient.requests[0].URL.Query().Get("trashed_at"); got != "is.null" {
 		t.Fatalf("decoded-entry active filter = %q, want is.null", got)
 	}
+	if got := httpClient.requests[0].URL.Query().Get("vaults.lifecycle_state"); got != "eq.active" {
+		t.Fatalf("parent vault state filter = %q, want eq.active", got)
+	}
+	if got := httpClient.requests[0].URL.Query().Get("transition_state"); got != "is.null" {
+		t.Fatalf("active entry transition filter = %q, want is.null", got)
+	}
 }
 
-func TestTrashAndRestoreEntryUseLifecyclePredicates(t *testing.T) {
-	httpClient := &recordingHTTP{}
+func TestTrashAndRestoreEntryUseRetryableLifecycleTransitions(t *testing.T) {
+	httpClient := &recordingHTTP{responseBodies: []string{
+		`[{"entry_id":"` + entryID + `","lifecycle_state":"active","transition_state":"trashing"}]`,
+		`[{"entry_id":"` + entryID + `","lifecycle_state":"trashed"}]`,
+		`[{"entry_id":"` + entryID + `","lifecycle_state":"trashed","transition_state":"restoring"}]`,
+		`[{"entry_id":"` + entryID + `","lifecycle_state":"active"}]`,
+	}}
 	client, _ := NewVaultClient("https://project.supabase.co", "anon", httpClient)
+	if _, ok, err := client.BeginTrashEntry(context.Background(), "access", ownerID, vaultID, entryID); err != nil || !ok {
+		t.Fatalf("BeginTrashEntry() = ok %v, error %v", ok, err)
+	}
 	if err := client.TrashEntry(context.Background(), "access", ownerID, vaultID, entryID); err != nil {
 		t.Fatal(err)
+	}
+	if _, ok, err := client.BeginRestoreEntry(context.Background(), "access", ownerID, vaultID, entryID); err != nil || !ok {
+		t.Fatalf("BeginRestoreEntry() = ok %v, error %v", ok, err)
 	}
 	if err := client.RestoreEntry(context.Background(), "access", ownerID, vaultID, entryID); err != nil {
 		t.Fatal(err)
 	}
-	if got := httpClient.requests[0].URL.Query().Get("trashed_at"); got != "is.null" {
-		t.Fatalf("entry trash filter = %q, want is.null", got)
+	if got := httpClient.requests[0].URL.Query().Get("transition_state"); got != "is.null" {
+		t.Fatalf("entry trash claim filter = %q, want is.null", got)
 	}
-	if got := httpClient.requests[1].URL.Query().Get("trashed_at"); got != "not.is.null" {
-		t.Fatalf("entry restore filter = %q, want not.is.null", got)
+	if !strings.Contains(httpClient.bodies[0], `"transition_state":"trashing"`) {
+		t.Fatalf("entry trash claim payload = %s", httpClient.bodies[0])
+	}
+	if got := httpClient.requests[1].URL.Query().Get("transition_state"); got != "eq.trashing" {
+		t.Fatalf("entry trash finalize filter = %q", got)
+	}
+	if !strings.Contains(httpClient.bodies[1], `"lifecycle_state":"trashed"`) {
+		t.Fatalf("entry trash finalize payload = %s", httpClient.bodies[1])
+	}
+	if got := httpClient.requests[3].URL.Query().Get("transition_state"); got != "eq.restoring" {
+		t.Fatalf("entry restore finalize filter = %q", got)
+	}
+	if !strings.Contains(httpClient.bodies[3], `"lifecycle_state":"active"`) {
+		t.Fatalf("entry restore finalize payload = %s", httpClient.bodies[3])
+	}
+}
+
+func TestBeginTrashEntryResumesAnExistingClaim(t *testing.T) {
+	httpClient := &recordingHTTP{responseBodies: []string{"[]", `[{"entry_id":"` + entryID + `","lifecycle_state":"active","transition_state":"trashing"}]`}}
+	client, _ := NewVaultClient("https://project.supabase.co", "anon", httpClient)
+	entry, ok, err := client.BeginTrashEntry(context.Background(), "access", ownerID, vaultID, entryID)
+	if err != nil || !ok || entry.EntryID != entryID {
+		t.Fatalf("resumed entry = %+v, ok %v, error %v", entry, ok, err)
+	}
+	if len(httpClient.requests) != 2 || httpClient.requests[1].Method != http.MethodGet {
+		t.Fatalf("resume requests = %d, want claim PATCH then lookup GET", len(httpClient.requests))
+	}
+	if got := httpClient.requests[1].URL.Query().Get("transition_state"); got != "eq.trashing" {
+		t.Fatalf("resume transition filter = %q", got)
 	}
 }
 
@@ -195,6 +255,9 @@ func TestListTrashedEntriesRequestsOnlyUnexpiredTrash(t *testing.T) {
 	}
 	if got := query.Get("purge_after"); !strings.HasPrefix(got, "gt.") {
 		t.Fatalf("purge_after filter = %q, want future-only predicate", got)
+	}
+	if got := query.Get("transition_state"); got != "is.null" {
+		t.Fatalf("trash transition filter = %q, want is.null", got)
 	}
 }
 
@@ -237,14 +300,14 @@ func TestDownloadActiveReturnsEncryptedStorageBytes(t *testing.T) {
 	}
 }
 
-func TestPurgeExpiredTrashUsesStorageAPIThenGuardedMetadata(t *testing.T) {
-	httpClient := &recordingHTTP{responseBodies: []string{"[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\"}]", "", "", ""}}
+func TestPurgeExpiredTrashClaimsBeforeUsingStorageAPI(t *testing.T) {
+	httpClient := &recordingHTTP{responseBodies: []string{"[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\",\"revision\":7}]", "[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\",\"revision\":8}]", "", "", ""}}
 	client, _ := NewVaultClient("https://project.supabase.co", "anon", httpClient)
 	if err := client.PurgeExpiredTrash(context.Background(), "service-role"); err != nil {
 		t.Fatal(err)
 	}
-	if len(httpClient.requests) != 4 {
-		t.Fatalf("requests = %d, want expired vault list, object delete, metadata delete, entry delete", len(httpClient.requests))
+	if len(httpClient.requests) != 5 {
+		t.Fatalf("requests = %d, want expired vault list, atomic claim, object delete, metadata delete, entry delete", len(httpClient.requests))
 	}
 	if got := httpClient.requests[0].URL.Query().Get("purge_after"); !strings.HasPrefix(got, "lte.") {
 		t.Fatalf("expired vault predicate = %q", got)
@@ -252,28 +315,41 @@ func TestPurgeExpiredTrashUsesStorageAPIThenGuardedMetadata(t *testing.T) {
 	if got := httpClient.requests[0].Header.Get("Authorization"); got != "Bearer service-role" {
 		t.Fatalf("purge authorization = %q", got)
 	}
-	if got := httpClient.requests[1].Method + " " + httpClient.requests[1].URL.Path; got != "DELETE /storage/v1/object/vaults/"+ownerID+"/"+vaultID+".kdbx" {
+	claim := httpClient.requests[1]
+	if got := claim.Method + " " + claim.URL.Path; got != "PATCH /rest/v1/vaults" {
+		t.Fatalf("purge claim request = %q", got)
+	}
+	if got := claim.URL.Query().Get("lifecycle_state"); got != "eq.trashed" {
+		t.Fatalf("purge claim state filter = %q", got)
+	}
+	if !strings.Contains(httpClient.bodies[1], `"lifecycle_state":"purging"`) {
+		t.Fatalf("purge claim body = %s", httpClient.bodies[1])
+	}
+	if got := httpClient.requests[2].Method + " " + httpClient.requests[2].URL.Path; got != "DELETE /storage/v1/object/vaults/"+ownerID+"/"+vaultID+".kdbx" {
 		t.Fatalf("object purge request = %q", got)
 	}
-	metadataQuery := httpClient.requests[2].URL.Query()
-	if got := metadataQuery.Get("purge_after"); !strings.HasPrefix(got, "lte.") || metadataQuery.Get("trashed_at") != "not.is.null" {
-		t.Fatalf("metadata purge lifecycle query = %q", httpClient.requests[2].URL.RawQuery)
+	metadataQuery := httpClient.requests[3].URL.Query()
+	if got := metadataQuery.Get("purge_after"); !strings.HasPrefix(got, "lte.") || metadataQuery.Get("lifecycle_state") != "eq.purging" || metadataQuery.Get("revision") != "eq.8" {
+		t.Fatalf("metadata purge lifecycle query = %q", httpClient.requests[3].URL.RawQuery)
 	}
-	if got := httpClient.requests[3].URL.Path; got != "/rest/v1/decoded_vault_entries" {
+	if got := httpClient.requests[4].URL.Path; got != "/rest/v1/decoded_vault_entries" {
 		t.Fatalf("entry purge endpoint = %q", got)
+	}
+	if got := httpClient.requests[4].URL.Query().Get("transition_state"); got != "is.null" {
+		t.Fatalf("entry purge transition filter = %q, want is.null", got)
 	}
 }
 
 func TestPurgeExpiredTrashContinuesWhenObjectWasAlreadyRemoved(t *testing.T) {
 	httpClient := &recordingHTTP{
-		responses:      []int{http.StatusOK, http.StatusNotFound, http.StatusNoContent, http.StatusNoContent},
-		responseBodies: []string{"[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\"}]"},
+		responses:      []int{http.StatusOK, http.StatusOK, http.StatusNotFound, http.StatusNoContent, http.StatusNoContent},
+		responseBodies: []string{"[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\",\"revision\":7}]", "[{\"id\":\"" + vaultID + "\",\"object_path\":\"" + ownerID + "/" + vaultID + ".kdbx\",\"revision\":8}]"},
 	}
 	client, _ := NewVaultClient("https://project.supabase.co", "anon", httpClient)
 	if err := client.PurgeExpiredTrash(context.Background(), "service-role"); err != nil {
 		t.Fatalf("PurgeExpiredTrash() error = %v, want missing Storage object tolerated", err)
 	}
-	if got := httpClient.requests[2].URL.Path; got != "/rest/v1/vaults" {
+	if got := httpClient.requests[3].URL.Path; got != "/rest/v1/vaults" {
 		t.Fatalf("metadata delete after missing object = %q", got)
 	}
 }

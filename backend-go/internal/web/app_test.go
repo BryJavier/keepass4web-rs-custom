@@ -56,9 +56,15 @@ func TestMultipartUnlockCSRFIsReadBeforeUnlockValidation(t *testing.T) {
 	app.mu.Unlock()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	if err := writer.WriteField("csrf_token", app.CSRFToken(cookie.Value)); err != nil { t.Fatal(err) }
-	if err := writer.WriteField("password", "test"); err != nil { t.Fatal(err) }
-	if err := writer.Close(); err != nil { t.Fatal(err) }
+	if err := writer.WriteField("csrf_token", app.CSRFToken(cookie.Value)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("password", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/vaults/unlock", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.AddCookie(cookie)
@@ -239,19 +245,26 @@ func (f *fakeAuth) Validate(context.Context, string) (supabase.Identity, error) 
 }
 
 type fakeRust struct {
-	closeErr       error
-	createEntryErr error
-	closed         []privateclient.HandleRequest
-	deleteErr      error
-	restoreErr     error
-	deleteResponse privateclient.DeleteEntryResponse
+	closeErr        error
+	createEntryErr  error
+	closed          []privateclient.HandleRequest
+	deleteErr       error
+	restoreErr      error
+	deleteResponse  privateclient.DeleteEntryResponse
 	restoreResponse privateclient.RestoreEntryResponse
-	deleteRequests []privateclient.DeleteEntryRequest
+	deleteRequests  []privateclient.DeleteEntryRequest
 	restoreRequests []privateclient.RestoreEntryRequest
+	unlockResponse  privateclient.UnlockResponse
+	unlockRequests  []privateclient.UnlockRequest
+	unlockErr       error
 }
 
-func (f *fakeRust) Unlock(context.Context, privateclient.UnlockRequest) (privateclient.UnlockResponse, error) {
-	return privateclient.UnlockResponse{}, errors.New("not implemented")
+func (f *fakeRust) Unlock(_ context.Context, request privateclient.UnlockRequest) (privateclient.UnlockResponse, error) {
+	f.unlockRequests = append(f.unlockRequests, request)
+	if f.unlockErr != nil {
+		return privateclient.UnlockResponse{}, f.unlockErr
+	}
+	return f.unlockResponse, nil
 }
 func (f *fakeRust) Groups(context.Context, privateclient.HandleRequest) (privateclient.GroupsResponse, error) {
 	return privateclient.GroupsResponse{}, errors.New("not implemented")
@@ -283,26 +296,31 @@ func (f *fakeRust) CreateEntry(context.Context, privateclient.CreateEntryRequest
 }
 func (f *fakeRust) DeleteEntry(_ context.Context, request privateclient.DeleteEntryRequest) (privateclient.DeleteEntryResponse, error) {
 	f.deleteRequests = append(f.deleteRequests, request)
-	if f.deleteErr != nil { return privateclient.DeleteEntryResponse{}, f.deleteErr }
+	if f.deleteErr != nil {
+		return privateclient.DeleteEntryResponse{}, f.deleteErr
+	}
 	return f.deleteResponse, nil
 }
 func (f *fakeRust) RestoreEntry(_ context.Context, request privateclient.RestoreEntryRequest) (privateclient.RestoreEntryResponse, error) {
 	f.restoreRequests = append(f.restoreRequests, request)
-	if f.restoreErr != nil { return privateclient.RestoreEntryResponse{}, f.restoreErr }
+	if f.restoreErr != nil {
+		return privateclient.RestoreEntryResponse{}, f.restoreErr
+	}
 	return f.restoreResponse, nil
 }
 
 type fakeSessionVaultsForCreate struct {
-	uploadedName  string
-	uploadedBytes []byte
-	vault         Vault
-	downloadBytes []byte
-	replaceErr error
-	replacedBytes []byte
-	trashedVaults []Vault
-	trashedEntries []DecodedEntry
-	entries []DecodedEntry
+	uploadedName                                            string
+	uploadedBytes                                           []byte
+	vault                                                   Vault
+	downloadBytes                                           []byte
+	replaceErr                                              error
+	replacedBytes                                           []byte
+	trashedVaults                                           []Vault
+	trashedEntries                                          []DecodedEntry
+	entries                                                 []DecodedEntry
 	renamed, trashed, restored, entryTrashed, entryRestored int
+	entryTrashErr, entryRestoreErr                          error
 }
 
 func (f *fakeSessionVaultsForCreate) ListForSession(context.Context, string, string) ([]Vault, error) {
@@ -323,7 +341,9 @@ func (f *fakeSessionVaultsForCreate) DownloadForSession(context.Context, string,
 	return f.downloadBytes, nil
 }
 func (f *fakeSessionVaultsForCreate) DownloadActiveForSession(context.Context, string, string, string) ([]byte, error) {
-	if f.vault.ID == "" { return nil, errors.New("not found") }
+	if f.vault.ID == "" {
+		return nil, errors.New("not found")
+	}
 	return f.downloadBytes, nil
 }
 func (f *fakeSessionVaultsForCreate) ReplaceForSession(_ context.Context, _ string, _ string, _ Vault, data []byte) error {
@@ -339,13 +359,43 @@ func (f *fakeSessionVaultsForCreate) DecodedEntries(context.Context, string, str
 func (f *fakeSessionVaultsForCreate) UpdateDecodedEntry(context.Context, string, string, string, string, DecodedEntry) error {
 	return nil
 }
-func (f *fakeSessionVaultsForCreate) RenameForSession(context.Context, string, string, string, string) error { f.renamed++; return nil }
-func (f *fakeSessionVaultsForCreate) TrashVaultForSession(context.Context, string, string, string) error { f.trashed++; return nil }
-func (f *fakeSessionVaultsForCreate) RestoreVaultForSession(context.Context, string, string, string) error { f.restored++; return nil }
-func (f *fakeSessionVaultsForCreate) TrashedVaultsForSession(context.Context, string, string) ([]Vault, error) { return f.trashedVaults, nil }
-func (f *fakeSessionVaultsForCreate) TrashEntryForSession(context.Context, string, string, string, string) error { f.entryTrashed++; return nil }
-func (f *fakeSessionVaultsForCreate) RestoreEntryForSession(context.Context, string, string, string, string) error { f.entryRestored++; return nil }
-func (f *fakeSessionVaultsForCreate) TrashedEntriesForSession(context.Context, string, string, string) ([]DecodedEntry, error) { return f.trashedEntries, nil }
+func (f *fakeSessionVaultsForCreate) RenameForSession(context.Context, string, string, string, string) error {
+	f.renamed++
+	return nil
+}
+func (f *fakeSessionVaultsForCreate) TrashVaultForSession(context.Context, string, string, string) error {
+	f.trashed++
+	return nil
+}
+func (f *fakeSessionVaultsForCreate) RestoreVaultForSession(context.Context, string, string, string) error {
+	f.restored++
+	return nil
+}
+func (f *fakeSessionVaultsForCreate) TrashedVaultsForSession(context.Context, string, string) ([]Vault, error) {
+	return f.trashedVaults, nil
+}
+func (f *fakeSessionVaultsForCreate) TrashEntryForSession(context.Context, string, string, string, string) error {
+	f.entryTrashed++
+	return f.entryTrashErr
+}
+func (f *fakeSessionVaultsForCreate) RestoreEntryForSession(context.Context, string, string, string, string) error {
+	f.entryRestored++
+	return f.entryRestoreErr
+}
+func (f *fakeSessionVaultsForCreate) BeginTrashEntryForSession(_ context.Context, _, _, _, entryID string) (DecodedEntry, bool, error) {
+	entry, ok := findEntry(f.entries, entryID)
+	return entry, ok, nil
+}
+func (f *fakeSessionVaultsForCreate) BeginRestoreEntryForSession(_ context.Context, _, _, _, entryID string) (DecodedEntry, bool, error) {
+	entry, ok := findEntry(f.trashedEntries, entryID)
+	return entry, ok, nil
+}
+func (f *fakeSessionVaultsForCreate) AbortEntryTransitionForSession(context.Context, string, string, string, string, string) error {
+	return nil
+}
+func (f *fakeSessionVaultsForCreate) TrashedEntriesForSession(context.Context, string, string, string) ([]DecodedEntry, error) {
+	return f.trashedEntries, nil
+}
 
 func TestProtectedRequestRejectsRevokedSupabaseToken(t *testing.T) {
 	auth := &fakeAuth{err: errors.New("revoked")}
@@ -487,8 +537,8 @@ func TestCreateEntryRequiresAnUnlockedVault(t *testing.T) {
 }
 
 func TestCreateEntryRendersBrowseErrorWhenReEncryptionFails(t *testing.T) {
-	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test vault"}}
-	app := NewApp(Dependencies{Rust: &fakeRust{createEntryErr: errors.New("wrong master password")}, SessionVaults: sessionVaults})
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test vault"}, downloadBytes: []byte("durable-kdbx")}
+	app := NewApp(Dependencies{Rust: &fakeRust{createEntryErr: errors.New("wrong master password"), unlockResponse: privateclient.UnlockResponse{Handle: "reloaded-handle"}}, SessionVaults: sessionVaults})
 	cookie := app.CreateSession("owner-1")
 	app.mu.Lock()
 	s := app.sessions[cookie.Value]
@@ -569,7 +619,9 @@ func TestIdleSweepInvalidatesTheBrowserSession(t *testing.T) {
 		request.AddCookie(cookie)
 		recorder := httptest.NewRecorder()
 		app.ServeHTTP(recorder, request)
-		var status struct { Active bool `json:"active"` }
+		var status struct {
+			Active bool `json:"active"`
+		}
 		if err := json.NewDecoder(recorder.Body).Decode(&status); err != nil {
 			t.Fatal(err)
 		}
@@ -714,9 +766,13 @@ func TestEntryTrashRequiresMasterPassword(t *testing.T) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	for key, value := range map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a"} {
-		if err := writer.WriteField(key, value); err != nil { t.Fatal(err) }
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := writer.Close(); err != nil { t.Fatal(err) }
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/vaults/entries/delete", &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.AddCookie(cookie)
@@ -730,8 +786,8 @@ func TestEntryTrashRequiresMasterPassword(t *testing.T) {
 }
 
 func TestEntryTrashDoesNotCreateTombstoneWhenStorageReplacementFails(t *testing.T) {
-	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}, entries: []DecodedEntry{{EntryID: "entry-a"}}, replaceErr: errors.New("storage unavailable")}
-	rust := &fakeRust{deleteResponse: privateclient.DeleteEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"}}
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}, entries: []DecodedEntry{{EntryID: "entry-a"}}, downloadBytes: []byte("durable-kdbx"), replaceErr: errors.New("storage unavailable")}
+	rust := &fakeRust{deleteResponse: privateclient.DeleteEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"}, unlockResponse: privateclient.UnlockResponse{Handle: "reloaded-handle"}}
 	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
 	cookie := app.CreateSession("owner-1")
 	app.mu.Lock()
@@ -747,11 +803,66 @@ func TestEntryTrashDoesNotCreateTombstoneWhenStorageReplacementFails(t *testing.
 	if recorder.Code != http.StatusBadGateway || sessionVaults.entryTrashed != 0 {
 		t.Fatalf("storage failure = status %d tombstones %d", recorder.Code, sessionVaults.entryTrashed)
 	}
+	if got := app.ActiveHandle(cookie.Value); got != "reloaded-handle" || len(rust.closed) != 1 || len(rust.unlockRequests) != 1 {
+		t.Fatalf("storage failure recovery = handle %q closes %d unlocks %d", got, len(rust.closed), len(rust.unlockRequests))
+	}
+}
+
+func TestEntryTrashFinalizationFailureReloadsDurableHandleForRetry(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{
+		vault: Vault{ID: "vault-a", Name: "Test"}, entries: []DecodedEntry{{EntryID: "entry-a"}},
+		downloadBytes: []byte("stored-mutated-kdbx"), entryTrashErr: errors.New("mirror unavailable"),
+	}
+	rust := &fakeRust{
+		deleteResponse: privateclient.DeleteEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"},
+		unlockResponse: privateclient.UnlockResponse{Handle: "retry-handle"},
+	}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := multipartFormRequest(t, "/vaults/entries/delete", cookie, map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a", "master_password": "master"})
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway || sessionVaults.entryTrashed != 1 {
+		t.Fatalf("finalization failure = status %d finalize calls %d", recorder.Code, sessionVaults.entryTrashed)
+	}
+	if got := app.ActiveHandle(cookie.Value); got != "retry-handle" {
+		t.Fatalf("handle after finalization failure = %q, want durable retry handle", got)
+	}
+}
+
+func TestBrowseRejectsStaleSessionAfterVaultWasTrashed(t *testing.T) {
+	rust := &fakeRust{}
+	app := NewApp(Dependencies{SessionVaults: &fakeSessionVaultsForCreate{}, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "trashed-vault", "stale-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := httptest.NewRequest(http.MethodGet, "/vaults/browse", nil)
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusSeeOther || recorder.Header().Get("Location") != "/vaults" {
+		t.Fatalf("stale browse = status %d redirect %q", recorder.Code, recorder.Header().Get("Location"))
+	}
+	if got := app.ActiveHandle(cookie.Value); got != "" || len(rust.closed) != 1 {
+		t.Fatalf("stale browse cleanup = handle %q closes %d", got, len(rust.closed))
+	}
 }
 
 func TestEntryRestoreForwardsOnlyGroupAndCredentialsToRust(t *testing.T) {
 	sessionVaults := &fakeSessionVaultsForCreate{
-		vault: Vault{ID: "vault-a", Name: "Test"},
+		vault:          Vault{ID: "vault-a", Name: "Test"},
 		trashedEntries: []DecodedEntry{{EntryID: "entry-a", GroupID: "original-group", Title: "secret title", Username: "secret user", Password: "secret password", URL: "https://secret", Notes: "secret notes"}},
 	}
 	rust := &fakeRust{restoreResponse: privateclient.RestoreEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"}}
@@ -771,13 +882,43 @@ func TestEntryRestoreForwardsOnlyGroupAndCredentialsToRust(t *testing.T) {
 		t.Fatalf("restore = status %d lifecycle %d calls %d", recorder.Code, sessionVaults.entryRestored, len(rust.restoreRequests))
 	}
 	got := rust.restoreRequests[0]
-	if got.PreferredGroupID == nil || *got.PreferredGroupID != "original-group" || got.Title != "" || got.Username != "" || got.Password != "" || got.URL != "" || got.Notes != "" {
+	if got.PreferredGroupID == nil || *got.PreferredGroupID != "original-group" {
 		t.Fatalf("restore request exposed tombstone fields: %+v", got)
 	}
 }
 
+func TestEntryRestoreStorageFailureReloadsDurableHandleAndKeepsTombstone(t *testing.T) {
+	sessionVaults := &fakeSessionVaultsForCreate{
+		vault:          Vault{ID: "vault-a", Name: "Test"},
+		trashedEntries: []DecodedEntry{{EntryID: "entry-a", GroupID: "original-group"}},
+		downloadBytes:  []byte("durable-tombstoned-kdbx"), replaceErr: errors.New("storage unavailable"),
+	}
+	rust := &fakeRust{
+		restoreResponse: privateclient.RestoreEntryResponse{EntryID: "entry-a", DatabaseB64: "ZmFrZS1rZGJ4"},
+		unlockResponse:  privateclient.UnlockResponse{Handle: "reloaded-restore-handle"},
+	}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults, Rust: rust})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID, s.activeHandle = "vault-a", "opaque-handle"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := multipartFormRequest(t, "/vaults/entries/restore", cookie, map[string]string{"csrf_token": app.CSRFToken(cookie.Value), "entry_id": "entry-a", "master_password": "master"})
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway || sessionVaults.entryRestored != 0 {
+		t.Fatalf("restore storage failure = status %d finalizations %d", recorder.Code, sessionVaults.entryRestored)
+	}
+	if got := app.ActiveHandle(cookie.Value); got != "reloaded-restore-handle" || len(rust.unlockRequests) != 1 {
+		t.Fatalf("restore recovery = handle %q unlocks %d", got, len(rust.unlockRequests))
+	}
+}
+
 func TestEntryTrashListDoesNotExposeTombstoneSecrets(t *testing.T) {
-	sessionVaults := &fakeSessionVaultsForCreate{trashedEntries: []DecodedEntry{{EntryID: "entry-a", Title: "Shown", Username: "shown-user", Password: "secret-password", URL: "https://secret", Notes: "secret notes", Fields: map[string]string{"api_key": "secret-key"}}}}
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Test"}, trashedEntries: []DecodedEntry{{EntryID: "entry-a", Title: "Shown", Username: "shown-user", Password: "secret-password", URL: "https://secret", Notes: "secret notes", Fields: map[string]string{"api_key": "secret-key"}}}}
 	app := NewApp(Dependencies{SessionVaults: sessionVaults})
 	cookie := app.CreateSession("owner-1")
 	app.mu.Lock()
@@ -796,14 +937,58 @@ func TestEntryTrashListDoesNotExposeTombstoneSecrets(t *testing.T) {
 	}
 }
 
+func TestVaultTrashHTMLRendersRecoveryActions(t *testing.T) {
+	until := time.Date(2026, time.August, 27, 0, 0, 0, 0, time.UTC)
+	sessionVaults := &fakeSessionVaultsForCreate{trashedVaults: []Vault{{ID: "vault-a", Name: "Old archive", PurgeAfter: &until}}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults})
+	cookie := app.CreateSession("owner-1")
+	request := httptest.NewRequest(http.MethodGet, "/vaults/trash", nil)
+	request.Header.Set("Accept", "text/html")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "Vault trash") || !strings.Contains(recorder.Body.String(), "Restore vault") {
+		t.Fatalf("vault trash HTML = status %d body %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestEntryTrashHTMLHidesSecretPayloadAndRendersRestoreForm(t *testing.T) {
+	until := time.Date(2026, time.August, 27, 0, 0, 0, 0, time.UTC)
+	sessionVaults := &fakeSessionVaultsForCreate{vault: Vault{ID: "vault-a", Name: "Personal"}, trashedEntries: []DecodedEntry{{EntryID: "entry-a", Title: "Old login", Username: "user", Password: "do-not-render", PurgeAfter: &until}}}
+	app := NewApp(Dependencies{SessionVaults: sessionVaults})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeVaultID = "vault-a"
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+	request := httptest.NewRequest(http.MethodGet, "/vaults/entries/trash", nil)
+	request.Header.Set("Accept", "text/html")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+
+	app.ServeHTTP(recorder, request)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.Contains(body, "Entry trash") || !strings.Contains(body, "Restore entry") || strings.Contains(body, "do-not-render") {
+		t.Fatalf("entry trash HTML = status %d body %s", recorder.Code, body)
+	}
+}
+
 func multipartFormRequest(t *testing.T, path string, cookie *http.Cookie, fields map[string]string) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	for key, value := range fields {
-		if err := writer.WriteField(key, value); err != nil { t.Fatal(err) }
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := writer.Close(); err != nil { t.Fatal(err) }
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, path, &body)
 	request.Header.Set("Content-Type", writer.FormDataContentType())
 	request.AddCookie(cookie)

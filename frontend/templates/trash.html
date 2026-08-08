@@ -1,0 +1,60 @@
+{{define "trash-header"}}
+<header class="sticky top-0 z-20 bg-white border-b border-neutral-300">
+  <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-2">
+    <a href="{{.BackHref}}" class="flex items-center gap-2 min-w-0 text-[#1d1f20] hover:text-[#3c5771]">
+      <span aria-hidden="true" class="text-lg leading-none">←</span>
+      {{template "brand-mark" .}}
+      <span class="font-heading text-sm font-semibold uppercase tracking-wide truncate">{{.Heading}}</span>
+    </a>
+    <div class="flex items-center gap-3">
+      <span class="hidden sm:inline text-xs text-neutral-500 truncate max-w-[10rem]">{{.Email}}</span>
+      <form method="post" action="/sign-out"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button type="submit" class="text-xs font-heading uppercase tracking-wide text-neutral-500 hover:text-[#3c5771]">Sign out</button></form>
+    </div>
+  </div>
+</header>
+{{end}}
+
+{{define "vault-trash"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
+<div class="min-h-screen bg-[#f2f2f3] text-[#1d1f20]">
+  {{template "trash-header" (dict "BackHref" "/vaults" "Heading" "Vault trash" "Email" .Email "CSRFToken" .CSRFToken)}}
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+    <div class="flex items-end justify-between gap-3"><div><p class="text-xs uppercase tracking-wide text-neutral-500">Recovery</p><h1 class="mt-1 font-heading text-xl font-semibold uppercase tracking-wide">Vault trash</h1><p class="mt-1 text-sm text-neutral-500">Deleted vaults are kept for 30 days before permanent removal.</p></div><span class="text-xs text-neutral-500">{{len .TrashedVaults}} items</span></div>
+    {{if .TrashedVaults}}
+    <div class="relative mt-6 border border-neutral-300 bg-white divide-y divide-neutral-200">{{template "corner-marks" .}}
+      {{range .TrashedVaults}}
+      <div class="flex flex-col sm:flex-row sm:items-center gap-4 px-4 py-4">
+        <img src="/static/icons/48.png" alt="" class="w-7 h-7 shrink-0 opacity-70" style="image-rendering:pixelated">
+        <div class="min-w-0 flex-1"><p class="font-medium text-sm truncate">{{.Name}}</p><p class="mt-1 text-xs text-neutral-500">Deleted {{formatDate .TrashedAt}} · Available until {{formatDate .PurgeAfter}}</p></div>
+        <form method="post" action="/vaults/restore" class="shrink-0"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="vault_id" value="{{.ID}}"><button type="submit" class="border border-[#5980a6] text-[#3c5771] hover:bg-accent-50 font-heading uppercase tracking-wide text-xs px-4 py-2">Restore vault</button></form>
+      </div>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="relative mt-6 border border-dashed border-neutral-300 bg-white py-14 text-center">{{template "corner-marks" .}}<p class="font-heading text-sm font-semibold uppercase tracking-wide text-neutral-500">Trash is empty</p><p class="mt-1 text-sm text-neutral-400">Deleted vaults will appear here for 30 days.</p></div>
+    {{end}}
+    <div class="mt-5 border border-accent-200 bg-accent-50 px-4 py-3 text-sm text-accent-900"><span class="font-medium">Recovery period.</span> There is no delete-now action. Items are permanently removed after their recovery period.</div>
+  </main>
+</div></body></html>{{end}}
+
+{{define "entry-trash"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
+<div class="min-h-screen bg-[#f2f2f3] text-[#1d1f20]">
+  {{template "trash-header" (dict "BackHref" "/vaults/browse" "Heading" .Selected.Name "Email" .Email "CSRFToken" .CSRFToken)}}
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+    <div class="flex items-end justify-between gap-3"><div><p class="text-xs uppercase tracking-wide text-neutral-500">{{.Selected.Name}}</p><h1 class="mt-1 font-heading text-xl font-semibold uppercase tracking-wide">Entry trash</h1><p class="mt-1 text-sm text-neutral-500">Restore entries to their original group while they are recoverable.</p></div><a href="/vaults/browse" class="text-xs font-heading uppercase tracking-wide text-[#3c5771] hover:text-[#5980a6]">Back to entries</a></div>
+    {{if .Entries}}
+    <div class="relative mt-6 border border-neutral-300 bg-white divide-y divide-neutral-200">{{template "corner-marks" .}}
+      {{range .Entries}}
+      <div class="flex flex-col sm:flex-row sm:items-center gap-4 px-4 py-4">
+        <img src="/static/icons/0.png" alt="" class="w-6 h-6 shrink-0 opacity-70" style="image-rendering:pixelated">
+        <div class="min-w-0 flex-1"><p class="font-medium text-sm truncate">{{.Title}}</p><p class="mt-1 text-xs text-neutral-500 truncate">{{.Username}} · Available until {{formatDate .PurgeAfter}}</p></div>
+        <button type="button" data-action="show-modal" data-target="restore-entry-{{.EntryID}}" class="shrink-0 border border-[#5980a6] text-[#3c5771] hover:bg-accent-50 font-heading uppercase tracking-wide text-xs px-4 py-2">Restore entry</button>
+        <dialog id="restore-entry-{{.EntryID}}" class="relative border border-neutral-300 p-6 max-w-sm w-[calc(100%-2rem)] [&::backdrop]:bg-[#1d1f20]/50">{{template "corner-marks" $}}<h3 class="font-heading text-base font-semibold uppercase tracking-wide">Restore entry?</h3><p class="mt-1 text-sm text-neutral-500">The entry will return to its original group, or the vault root if that group no longer exists.</p><form method="post" action="/vaults/entries/restore" enctype="multipart/form-data" class="mt-4 space-y-3"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="entry_id" value="{{.EntryID}}"><div><label class="block text-xs font-medium text-neutral-600 uppercase tracking-wide">Master password</label><input type="password" name="master_password" required autocomplete="current-password" class="mt-1 w-full border border-neutral-300 px-3 py-2 text-sm"></div><div><label class="block text-xs font-medium text-neutral-600 uppercase tracking-wide">Key file <span class="font-normal text-neutral-400">(optional)</span></label><input type="file" name="key_file" class="mt-1 w-full text-sm"></div><div class="flex justify-end gap-2 pt-2"><button type="button" data-action="close-modal" class="border border-neutral-300 px-4 py-2 text-xs font-heading uppercase tracking-wide hover:bg-neutral-50">Cancel</button><button type="submit" class="bg-[#5980a6] hover:bg-[#4a6c8c] text-white px-4 py-2 text-xs font-heading uppercase tracking-wide">Restore entry</button></div></form></dialog>
+      </div>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="relative mt-6 border border-dashed border-neutral-300 bg-white py-14 text-center">{{template "corner-marks" .}}<p class="font-heading text-sm font-semibold uppercase tracking-wide text-neutral-500">Entry trash is empty</p><p class="mt-1 text-sm text-neutral-400">Deleted entries will appear here for 30 days.</p></div>
+    {{end}}
+    <div class="mt-5 border border-accent-200 bg-accent-50 px-4 py-3 text-sm text-accent-900"><span class="font-medium">Recovery period.</span> Entry contents stay hidden in trash. They are permanently removed after the recovery period.</div>
+  </main>
+</div></body></html>{{end}}

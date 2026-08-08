@@ -8,14 +8,14 @@ import (
 
 func completeEnvironment() map[string]string {
 	return map[string]string{
-		"APP_ENV":             "production",
-		"APP_LISTEN_ADDR":     ":8080",
-		"APP_SESSION_SECRET":  "session-secret",
-		"SUPABASE_URL":        "https://project.supabase.co",
-		"SUPABASE_ANON_KEY":   "anon-key",
-		"SUPABASE_JWT_ISSUER": "https://project.supabase.co/auth/v1",
-		"RUST_SERVICE_URL":    "http://rust-service:8080",
-		"RUST_SERVICE_TOKEN":  "rust-service-token",
+		"APP_ENV":                   "production",
+		"APP_LISTEN_ADDR":           ":8080",
+		"APP_SESSION_SECRET":        "session-secret",
+		"SUPABASE_URL":              "https://project.supabase.co",
+		"SUPABASE_ANON_KEY":         "anon-key",
+		"SUPABASE_JWT_ISSUER":       "https://project.supabase.co/auth/v1",
+		"RUST_SERVICE_URL":          "http://rust-service:8080",
+		"RUST_SERVICE_TOKEN":        "rust-service-token",
 		"SUPABASE_SERVICE_ROLE_KEY": "service-role-key",
 	}
 }

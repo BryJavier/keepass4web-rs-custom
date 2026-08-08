@@ -16,26 +16,30 @@ import (
 
 // Vault is metadata only; KDBX bytes are always handled through private Storage.
 type Vault struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	ObjectPath  string     `json:"object_path"`
-	UploadState string     `json:"upload_state"`
-	TrashedAt   *time.Time `json:"trashed_at,omitempty"`
-	PurgeAfter  *time.Time `json:"purge_after,omitempty"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	ObjectPath     string     `json:"object_path"`
+	UploadState    string     `json:"upload_state"`
+	LifecycleState string     `json:"lifecycle_state"`
+	Revision       int64      `json:"revision"`
+	TrashedAt      *time.Time `json:"trashed_at,omitempty"`
+	PurgeAfter     *time.Time `json:"purge_after,omitempty"`
 }
 type DecodedEntry struct {
-	VaultID     string            `json:"vault_id"`
-	OwnerID     string            `json:"owner_id"`
-	EntryID     string            `json:"entry_id"`
-	GroupID     string            `json:"group_id"`
-	Title       string            `json:"title"`
-	Username    string            `json:"username"`
-	Password    string            `json:"password"`
-	URL         string            `json:"url"`
-	Notes       string            `json:"notes"`
-	Fields      map[string]string `json:"fields"`
-	TrashedAt   *time.Time        `json:"trashed_at,omitempty"`
-	PurgeAfter  *time.Time        `json:"purge_after,omitempty"`
+	VaultID         string            `json:"vault_id"`
+	OwnerID         string            `json:"owner_id"`
+	EntryID         string            `json:"entry_id"`
+	GroupID         string            `json:"group_id"`
+	Title           string            `json:"title"`
+	Username        string            `json:"username"`
+	Password        string            `json:"password"`
+	URL             string            `json:"url"`
+	Notes           string            `json:"notes"`
+	Fields          map[string]string `json:"fields"`
+	LifecycleState  string            `json:"lifecycle_state"`
+	TransitionState string            `json:"transition_state,omitempty"`
+	TrashedAt       *time.Time        `json:"trashed_at,omitempty"`
+	PurgeAfter      *time.Time        `json:"purge_after,omitempty"`
 }
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
@@ -103,13 +107,13 @@ func (c *VaultClient) TrashVault(ctx context.Context, accessToken, ownerID, vaul
 }
 
 func (c *VaultClient) RestoreVault(ctx context.Context, accessToken, ownerID, vaultID string) error {
-	q := url.Values{"owner_id": {"eq." + ownerID}, "id": {"eq." + vaultID}, "upload_state": {"eq.uploaded"}, "trashed_at": {"not.is.null"}}
-	return c.request(ctx, http.MethodPatch, "/rest/v1/vaults?"+q.Encode(), accessToken, clearLifecyclePayload(), nil)
+	q := url.Values{"owner_id": {"eq." + ownerID}, "id": {"eq." + vaultID}, "upload_state": {"eq.uploaded"}, "trashed_at": {"not.is.null"}, "lifecycle_state": {"eq.trashed"}}
+	return c.request(ctx, http.MethodPatch, "/rest/v1/vaults?"+q.Encode(), accessToken, clearVaultLifecyclePayload(), nil)
 }
 
 func (c *VaultClient) ListTrashedVaults(ctx context.Context, accessToken, ownerID string) ([]Vault, error) {
 	q := trashedQuery(ownerID, time.Now().UTC())
-	q.Set("select", "id,name,object_path,upload_state,trashed_at,purge_after")
+	q.Set("select", "id,name,object_path,upload_state,lifecycle_state,revision,trashed_at,purge_after")
 	q.Set("upload_state", "eq.uploaded")
 	q.Set("order", "trashed_at.desc")
 	var result []Vault
@@ -121,7 +125,7 @@ func (c *VaultClient) CreateAndUpload(ctx context.Context, accessToken, ownerID,
 	if name == "" || len(name) > 255 || !uuidLike(ownerID) || !uuidLike(vaultID) {
 		return Vault{}, fmt.Errorf("invalid vault metadata")
 	}
-	v := Vault{ID: vaultID, Name: name, ObjectPath: ownerID + "/" + vaultID + ".kdbx", UploadState: "pending"}
+	v := Vault{ID: vaultID, Name: name, ObjectPath: ownerID + "/" + vaultID + ".kdbx", UploadState: "pending", LifecycleState: "active", Revision: 1}
 	// The authenticated JWT is authoritative at RLS time; owner_id is sent only
 	// to satisfy the table's non-null column and is constrained to auth.uid().
 	if err := c.request(ctx, http.MethodPost, "/rest/v1/vaults", accessToken, []map[string]string{{"id": v.ID, "name": v.Name, "object_path": v.ObjectPath, "upload_state": v.UploadState, "owner_id": ownerID}}, nil); err != nil {
@@ -191,7 +195,7 @@ func (c *VaultClient) SyncActiveDecodedEntries(ctx context.Context, accessToken,
 		seen[entries[i].EntryID] = struct{}{}
 		entryIDs[i] = entries[i].EntryID
 		entries[i].VaultID, entries[i].OwnerID = vaultID, ownerID
-		entries[i].TrashedAt, entries[i].PurgeAfter = nil, nil
+		entries[i].TrashedAt, entries[i].PurgeAfter, entries[i].LifecycleState = nil, nil, "active"
 		if entries[i].Fields == nil {
 			entries[i].Fields = map[string]string{}
 		}
@@ -224,19 +228,80 @@ func (c *VaultClient) UpdateDecodedEntry(ctx context.Context, accessToken, owner
 }
 
 func (c *VaultClient) TrashEntry(ctx context.Context, accessToken, ownerID, vaultID, entryID string) error {
-	q := activeEntryQuery(ownerID, vaultID)
-	q.Set("entry_id", "eq."+entryID)
-	return c.trash(ctx, accessToken, "/rest/v1/decoded_vault_entries?"+q.Encode())
+	trashedAt := time.Now().UTC()
+	q := entryTransitionQuery(ownerID, vaultID, entryID, "active", "trashing")
+	return c.requireEntryPatch(ctx, accessToken, q, map[string]any{
+		"lifecycle_state": "trashed", "transition_state": nil,
+		"trashed_at": trashedAt, "purge_after": trashedAt.AddDate(0, 0, 30),
+	})
 }
 
 func (c *VaultClient) RestoreEntry(ctx context.Context, accessToken, ownerID, vaultID, entryID string) error {
-	q := url.Values{"owner_id": {"eq." + ownerID}, "vault_id": {"eq." + vaultID}, "entry_id": {"eq." + entryID}, "trashed_at": {"not.is.null"}}
-	return c.request(ctx, http.MethodPatch, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken, clearLifecyclePayload(), nil)
+	q := entryTransitionQuery(ownerID, vaultID, entryID, "trashed", "restoring")
+	return c.requireEntryPatch(ctx, accessToken, q, clearEntryLifecyclePayload())
+}
+
+// BeginTrashEntry and BeginRestoreEntry atomically hide an entry from both UI
+// lists before KDBX bytes are changed. A retry resumes an already claimed row.
+func (c *VaultClient) BeginTrashEntry(ctx context.Context, accessToken, ownerID, vaultID, entryID string) (DecodedEntry, bool, error) {
+	return c.beginEntryTransition(ctx, accessToken, ownerID, vaultID, entryID, "active", "trashing")
+}
+
+func (c *VaultClient) BeginRestoreEntry(ctx context.Context, accessToken, ownerID, vaultID, entryID string) (DecodedEntry, bool, error) {
+	return c.beginEntryTransition(ctx, accessToken, ownerID, vaultID, entryID, "trashed", "restoring")
+}
+
+func (c *VaultClient) AbortEntryTransition(ctx context.Context, accessToken, ownerID, vaultID, entryID, transition string) error {
+	if transition != "trashing" && transition != "restoring" {
+		return fmt.Errorf("invalid entry transition")
+	}
+	q := url.Values{
+		"owner_id": {"eq." + ownerID}, "vault_id": {"eq." + vaultID},
+		"entry_id": {"eq." + entryID}, "transition_state": {"eq." + transition},
+	}
+	return c.request(ctx, http.MethodPatch, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken, map[string]any{"transition_state": nil}, nil)
+}
+
+func (c *VaultClient) beginEntryTransition(ctx context.Context, accessToken, ownerID, vaultID, entryID, lifecycle, transition string) (DecodedEntry, bool, error) {
+	q := url.Values{
+		"owner_id": {"eq." + ownerID}, "vault_id": {"eq." + vaultID}, "entry_id": {"eq." + entryID},
+		"lifecycle_state": {"eq." + lifecycle}, "transition_state": {"is.null"},
+	}
+	var rows []DecodedEntry
+	err := c.requestWithHeaders(ctx, http.MethodPatch, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken,
+		map[string]string{"transition_state": transition}, &rows, http.Header{"Prefer": {"return=representation"}})
+	if err != nil {
+		return DecodedEntry{}, false, err
+	}
+	if len(rows) == 1 {
+		return rows[0], true, nil
+	}
+	q.Set("transition_state", "eq."+transition)
+	var claimed []DecodedEntry
+	if err := c.request(ctx, http.MethodGet, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken, nil, &claimed); err != nil {
+		return DecodedEntry{}, false, err
+	}
+	if len(claimed) != 1 {
+		return DecodedEntry{}, false, nil
+	}
+	return claimed[0], true, nil
+}
+
+func (c *VaultClient) requireEntryPatch(ctx context.Context, accessToken string, q url.Values, payload map[string]any) error {
+	var rows []DecodedEntry
+	if err := c.requestWithHeaders(ctx, http.MethodPatch, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken,
+		payload, &rows, http.Header{"Prefer": {"return=representation"}}); err != nil {
+		return err
+	}
+	if len(rows) != 1 {
+		return fmt.Errorf("entry transition not found")
+	}
+	return nil
 }
 
 func (c *VaultClient) ListTrashedEntries(ctx context.Context, accessToken, ownerID, vaultID string) ([]DecodedEntry, error) {
-	q := trashedQuery(ownerID, time.Now().UTC())
-	q.Set("vault_id", "eq."+vaultID)
+	q := trashedEntryQuery(ownerID, vaultID)
+	q.Set("purge_after", "gt."+time.Now().UTC().Format(time.RFC3339Nano))
 	q.Set("order", "trashed_at.desc")
 	var result []DecodedEntry
 	err := c.request(ctx, http.MethodGet, "/rest/v1/decoded_vault_entries?"+q.Encode(), accessToken, nil, &result)
@@ -248,22 +313,45 @@ func (c *VaultClient) ListTrashedEntries(ctx context.Context, accessToken, owner
 // vault metadata; no direct storage SQL operation is attempted.
 func (c *VaultClient) PurgeExpiredTrash(ctx context.Context, serviceToken string) error {
 	now := time.Now().UTC()
-	q := url.Values{"select": {"id,object_path"}, "trashed_at": {"not.is.null"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
+	q := url.Values{"select": {"id,object_path,revision,lifecycle_state"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}, "lifecycle_state": {"in.(trashed,purging)"}}
 	var vaults []Vault
 	if err := c.request(ctx, http.MethodGet, "/rest/v1/vaults?"+q.Encode(), serviceToken, nil, &vaults); err != nil {
 		return err
 	}
 	for _, vault := range vaults {
-		if err := c.deleteStorageObject(ctx, serviceToken, vault.ObjectPath); err != nil {
+		claimed, ok, err := c.claimPurge(ctx, serviceToken, vault, now)
+		if err != nil {
 			return err
 		}
-		deleteQuery := url.Values{"id": {"eq." + vault.ID}, "trashed_at": {"not.is.null"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
+		if !ok {
+			continue
+		}
+		if err := c.deleteStorageObject(ctx, serviceToken, claimed.ObjectPath); err != nil {
+			return err
+		}
+		deleteQuery := url.Values{"id": {"eq." + claimed.ID}, "lifecycle_state": {"eq.purging"}, "revision": {"eq." + fmt.Sprint(claimed.Revision)}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
 		if err := c.request(ctx, http.MethodDelete, "/rest/v1/vaults?"+deleteQuery.Encode(), serviceToken, nil, nil); err != nil {
 			return err
 		}
 	}
-	entryQuery := url.Values{"trashed_at": {"not.is.null"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
+	entryQuery := url.Values{"lifecycle_state": {"eq.trashed"}, "transition_state": {"is.null"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
 	return c.request(ctx, http.MethodDelete, "/rest/v1/decoded_vault_entries?"+entryQuery.Encode(), serviceToken, nil, nil)
+}
+
+func (c *VaultClient) claimPurge(ctx context.Context, serviceToken string, vault Vault, now time.Time) (Vault, bool, error) {
+	if vault.LifecycleState == "purging" {
+		return vault, true, nil
+	}
+	q := url.Values{"id": {"eq." + vault.ID}, "lifecycle_state": {"eq.trashed"}, "purge_after": {"lte." + now.Format(time.RFC3339Nano)}}
+	var claimed []Vault
+	err := c.requestWithHeaders(ctx, http.MethodPatch, "/rest/v1/vaults?"+q.Encode(), serviceToken, map[string]string{"lifecycle_state": "purging"}, &claimed, http.Header{"Prefer": {"return=representation"}})
+	if err != nil {
+		return Vault{}, false, err
+	}
+	if len(claimed) != 1 {
+		return Vault{}, false, nil
+	}
+	return claimed[0], true, nil
 }
 
 func (c *VaultClient) deleteStorageObject(ctx context.Context, serviceToken, objectPath string) error {
@@ -277,38 +365,68 @@ func (c *VaultClient) deleteStorageObject(ctx context.Context, serviceToken, obj
 
 func activeVaultQuery(ownerID string) url.Values {
 	return url.Values{
-		"select":       {"id,name,object_path,upload_state,trashed_at,purge_after"},
-		"owner_id":     {"eq." + ownerID},
-		"upload_state": {"eq.uploaded"},
-		"trashed_at":   {"is.null"},
+		"select":          {"id,name,object_path,upload_state,lifecycle_state,revision,trashed_at,purge_after"},
+		"owner_id":        {"eq." + ownerID},
+		"upload_state":    {"eq.uploaded"},
+		"trashed_at":      {"is.null"},
+		"lifecycle_state": {"eq.active"},
 	}
 }
 
 func activeEntryQuery(ownerID, vaultID string) url.Values {
 	return url.Values{
-		"owner_id":   {"eq." + ownerID},
-		"vault_id":   {"eq." + vaultID},
-		"trashed_at": {"is.null"},
+		"select":                 {"*,vaults!inner(id)"},
+		"owner_id":               {"eq." + ownerID},
+		"vault_id":               {"eq." + vaultID},
+		"trashed_at":             {"is.null"},
+		"lifecycle_state":        {"eq.active"},
+		"transition_state":       {"is.null"},
+		"vaults.lifecycle_state": {"eq.active"},
 	}
 }
 
 func trashedQuery(ownerID string, now time.Time) url.Values {
 	return url.Values{
-		"owner_id":     {"eq." + ownerID},
-		"trashed_at":   {"not.is.null"},
-		"purge_after": {"gt." + now.Format(time.RFC3339Nano)},
+		"owner_id":        {"eq." + ownerID},
+		"trashed_at":      {"not.is.null"},
+		"purge_after":     {"gt." + now.Format(time.RFC3339Nano)},
+		"lifecycle_state": {"eq.trashed"},
 	}
 }
 
-func clearLifecyclePayload() map[string]any {
-	return map[string]any{"trashed_at": nil, "purge_after": nil}
+func trashedEntryQuery(ownerID, vaultID string) url.Values {
+	return url.Values{
+		"select":                 {"*,vaults!inner(id)"},
+		"owner_id":               {"eq." + ownerID},
+		"vault_id":               {"eq." + vaultID},
+		"trashed_at":             {"not.is.null"},
+		"lifecycle_state":        {"eq.trashed"},
+		"transition_state":       {"is.null"},
+		"vaults.lifecycle_state": {"eq.active"},
+	}
+}
+
+func entryTransitionQuery(ownerID, vaultID, entryID, lifecycle, transition string) url.Values {
+	return url.Values{
+		"owner_id": {"eq." + ownerID}, "vault_id": {"eq." + vaultID}, "entry_id": {"eq." + entryID},
+		"lifecycle_state": {"eq." + lifecycle}, "transition_state": {"eq." + transition},
+	}
+}
+
+func clearVaultLifecyclePayload() map[string]any {
+	return map[string]any{"lifecycle_state": "active", "trashed_at": nil, "purge_after": nil}
+}
+
+func clearEntryLifecyclePayload() map[string]any {
+	return map[string]any{"lifecycle_state": "active", "transition_state": nil, "trashed_at": nil, "purge_after": nil}
 }
 
 func (c *VaultClient) trash(ctx context.Context, accessToken, endpoint string) error {
 	trashedAt := time.Now().UTC()
-	return c.request(ctx, http.MethodPatch, endpoint, accessToken, map[string]time.Time{
-		"trashed_at":  trashedAt,
-		"purge_after": trashedAt.AddDate(0, 0, 30),
+	return c.request(ctx, http.MethodPatch, endpoint, accessToken, map[string]any{
+		"lifecycle_state": "trashed",
+		"trashed_at":      trashedAt,
+		"purge_after":     trashedAt.AddDate(0, 0, 30),
 	}, nil)
 }
 

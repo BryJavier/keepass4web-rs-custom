@@ -25,6 +25,7 @@ var goOutputSentinels = []string{
 	"sentinel-decoded-data",
 	"sentinel-protected-value",
 	"sentinel-session-data",
+	"sentinel-service-role-key",
 }
 
 func TestGoOutputContract(t *testing.T) {
@@ -117,6 +118,7 @@ func webEnvironment(address string) []string {
 		"APP_SESSION_SECRET=sentinel-password",
 		"SUPABASE_URL=https://sentinel-token.example",
 		"SUPABASE_ANON_KEY=sentinel-authorization-header",
+		"SUPABASE_SERVICE_ROLE_KEY=sentinel-service-role-key",
 		"SUPABASE_JWT_ISSUER=https://sentinel-jwt-issuer.example/auth/v1",
 		"RUST_SERVICE_URL=http://sentinel-decoded-data.example",
 		"RUST_SERVICE_TOKEN=sentinel-protected-value",

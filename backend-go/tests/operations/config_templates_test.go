@@ -21,12 +21,12 @@ func TestConfigurationTemplates(t *testing.T) {
 			path: "deploy/config/go.env.example",
 			requiredKeys: []string{
 				"APP_ENV", "APP_LISTEN_ADDR", "APP_SESSION_SECRET", "SUPABASE_URL",
-				"SUPABASE_ANON_KEY", "SUPABASE_JWT_ISSUER", "RUST_SERVICE_URL", "RUST_SERVICE_TOKEN",
+				"SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_JWT_ISSUER", "RUST_SERVICE_URL", "RUST_SERVICE_TOKEN",
 			},
 		},
 		{
 			path:         "deploy/config/rust.env.example",
-			requiredKeys: []string{"RUST_LISTEN_ADDR", "RUST_SERVICE_TOKEN"},
+			requiredKeys: []string{"RUST_PRIVATE_LISTEN", "RUST_SERVICE_TOKEN", "PRIVATE_SERVICE_ALLOW_CONTAINER_BIND"},
 		},
 		{
 			path:         "deploy/config/supabase.env.example",

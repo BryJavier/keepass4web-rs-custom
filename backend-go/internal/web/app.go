@@ -55,6 +55,9 @@ type SessionVaultRepository interface {
 	TrashedVaultsForSession(context.Context, string, string) ([]Vault, error)
 	TrashEntryForSession(context.Context, string, string, string, string) error
 	RestoreEntryForSession(context.Context, string, string, string, string) error
+	BeginTrashEntryForSession(context.Context, string, string, string, string) (DecodedEntry, bool, error)
+	BeginRestoreEntryForSession(context.Context, string, string, string, string) (DecodedEntry, bool, error)
+	AbortEntryTransitionForSession(context.Context, string, string, string, string, string) error
 	TrashedEntriesForSession(context.Context, string, string, string) ([]DecodedEntry, error)
 }
 type RustVaultService interface {
@@ -71,20 +74,21 @@ type RustVaultService interface {
 	RestoreEntry(context.Context, privateclient.RestoreEntryRequest) (privateclient.RestoreEntryResponse, error)
 }
 type DecodedEntry struct {
-	EntryID  string
-	GroupID  string
-	Title    string
-	Username string
-	Password string
-	URL      string
-	Notes    string
-	Fields   map[string]string
+	EntryID    string
+	GroupID    string
+	Title      string
+	Username   string
+	Password   string
+	URL        string
+	Notes      string
+	Fields     map[string]string
 	TrashedAt  *time.Time
 	PurgeAfter *time.Time
 }
 type TokenValidator interface {
 	Validate(context.Context, string) (supabase.Identity, error)
 }
+
 // TrashPurger is the only server-only capability the HTTP app receives. Its
 // implementation retains any service-role credential outside this package.
 type TrashPurger interface {
@@ -117,7 +121,7 @@ type Dependencies struct {
 }
 type session struct {
 	userID, accessToken, csrfToken, activeHandle, activeVaultID, email string
-	lastActivity time.Time
+	lastActivity                                                       time.Time
 }
 type App struct {
 	vaults          VaultRepository
@@ -156,7 +160,9 @@ func NewApp(d Dependencies) *App {
 		trashPurger:     d.TrashPurger,
 		purgeError:      d.PurgeError,
 		tmpl: template.Must(template.New("pages").Funcs(template.FuncMap{
-			"lower": strings.ToLower,
+			"lower":      strings.ToLower,
+			"formatDate": formatDate,
+			"dict":       templateDict,
 		}).ParseGlob(templatesGlob())),
 		sessions: map[string]session{},
 	}
@@ -510,27 +516,69 @@ func (a *App) createVault(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) renameVault(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden)
+		return
+	}
 	vaultID, name := strings.TrimSpace(r.Form.Get("vault_id")), strings.TrimSpace(r.Form.Get("name"))
-	if vaultID == "" || name == "" || len(name) > 255 { http.Error(w, "Enter a vault name.", http.StatusBadRequest); return }
-	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil { http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError); return } else if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil { http.Error(w, "Vault rename is unavailable.", http.StatusServiceUnavailable); return }
-	if err := a.sessionVaults.RenameForSession(r.Context(), s.userID, s.accessToken, vaultID, name); err != nil { http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError); return }
-	if isHTMX(r) { a.vaultsPage(w, r); return }
+	if vaultID == "" || name == "" || len(name) > 255 {
+		http.Error(w, "Enter a vault name.", http.StatusBadRequest)
+		return
+	}
+	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil {
+		http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError)
+		return
+	} else if !owned {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Vault rename is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	if err := a.sessionVaults.RenameForSession(r.Context(), s.userID, s.accessToken, vaultID, name); err != nil {
+		http.Error(w, "Unable to rename that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if isHTMX(r) {
+		a.vaultsPage(w, r)
+		return
+	}
 	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 }
 func (a *App) downloadVault(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
 	vaultID := strings.TrimSpace(r.URL.Query().Get("vault_id"))
-	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
+	if vaultID == "" {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
 	v, owned, err := a.vault(r.Context(), s, vaultID)
-	if err != nil { http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError); return }
-	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil { http.Error(w, "Vault download is unavailable.", http.StatusServiceUnavailable); return }
+	if err != nil {
+		http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Vault download is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	data, err := a.sessionVaults.DownloadActiveForSession(r.Context(), s.userID, s.accessToken, vaultID)
-	if err != nil { http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError); return }
+	if err != nil {
+		http.Error(w, "Unable to download that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+downloadFilename(v.Name)+`"`)
 	w.Header().Set("Cache-Control", "no-store")
@@ -538,18 +586,43 @@ func (a *App) downloadVault(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) trashVault(w http.ResponseWriter, r *http.Request) {
 	id, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
-	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
-	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil { http.Error(w, "Vault deletion is unavailable.", http.StatusServiceUnavailable); return }
-	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return } else if !owned {
-		trashed, listErr := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
-		if listErr != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return }
-		if containsVault(trashed, vaultID) { http.Redirect(w, r, "/vaults", http.StatusSeeOther); return }
-		http.Error(w, "Vault not found.", http.StatusNotFound); return
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
 	}
-	if err := a.sessionVaults.TrashVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil { http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError); return }
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden)
+		return
+	}
+	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
+	if vaultID == "" {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Vault deletion is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	if _, owned, err := a.vault(r.Context(), s, vaultID); err != nil {
+		http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError)
+		return
+	} else if !owned {
+		trashed, listErr := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
+		if listErr != nil {
+			http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError)
+			return
+		}
+		if containsVault(trashed, vaultID) {
+			http.Redirect(w, r, "/vaults", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if err := a.sessionVaults.TrashVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil {
+		http.Error(w, "Unable to delete that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
 	if s.activeVaultID == vaultID {
 		if err := a.closeActive(r.Context(), s); err != nil {
 			_ = a.sessionVaults.RestoreVaultForSession(r.Context(), s.userID, s.accessToken, vaultID)
@@ -561,36 +634,90 @@ func (a *App) trashVault(w http.ResponseWriter, r *http.Request) {
 		a.sessions[id] = s
 		a.mu.Unlock()
 	}
-	if isHTMX(r) { a.vaultsPage(w, r); return }
+	if isHTMX(r) {
+		a.vaultsPage(w, r)
+		return
+	}
 	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 }
 func (a *App) trashedVaults(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if a.sessionVaults == nil { http.Error(w, "Vault trash is unavailable.", http.StatusServiceUnavailable); return }
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Vault trash is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	vaults, err := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
-	if err != nil { http.Error(w, "Unable to load vault trash. Please try again.", http.StatusInternalServerError); return }
-	type vaultTombstone struct { ID string `json:"id"`; Name string `json:"name"`; TrashedAt *time.Time `json:"trashed_at"`; PurgeAfter *time.Time `json:"purge_after"` }
+	if err != nil {
+		http.Error(w, "Unable to load vault trash. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if wantsHTML(r) {
+		a.render(w, "vault-trash", vaultTrashPage{
+			vaultPage:     vaultPage{CSRFToken: s.csrfToken, Email: s.email},
+			TrashedVaults: vaults,
+		})
+		return
+	}
+	type vaultTombstone struct {
+		ID         string     `json:"id"`
+		Name       string     `json:"name"`
+		TrashedAt  *time.Time `json:"trashed_at"`
+		PurgeAfter *time.Time `json:"purge_after"`
+	}
 	out := make([]vaultTombstone, len(vaults))
-	for i, v := range vaults { out[i] = vaultTombstone{ID: v.ID, Name: v.Name, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter} }
+	for i, v := range vaults {
+		out[i] = vaultTombstone{ID: v.ID, Name: v.Name, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(out)
 }
 func (a *App) restoreVault(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return }
-	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
-	if vaultID == "" { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil { http.Error(w, "Vault restore is unavailable.", http.StatusServiceUnavailable); return }
-	trashed, err := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
-	if err != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return }
-	if !containsVault(trashed, vaultID) {
-		if _, owned, activeErr := a.vault(r.Context(), s, vaultID); activeErr != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return } else if owned { http.Redirect(w, r, "/vaults", http.StatusSeeOther); return }
-		http.Error(w, "Vault not found.", http.StatusNotFound); return
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
 	}
-	if err := a.sessionVaults.RestoreVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil { http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError); return }
-	if isHTMX(r) { a.vaultsPage(w, r); return }
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden)
+		return
+	}
+	vaultID := strings.TrimSpace(r.Form.Get("vault_id"))
+	if vaultID == "" {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Vault restore is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	trashed, err := a.sessionVaults.TrashedVaultsForSession(r.Context(), s.userID, s.accessToken)
+	if err != nil {
+		http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if !containsVault(trashed, vaultID) {
+		if _, owned, activeErr := a.vault(r.Context(), s, vaultID); activeErr != nil {
+			http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError)
+			return
+		} else if owned {
+			http.Redirect(w, r, "/vaults", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if err := a.sessionVaults.RestoreVaultForSession(r.Context(), s.userID, s.accessToken, vaultID); err != nil {
+		http.Error(w, "Unable to restore that vault. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if isHTMX(r) {
+		a.vaultsPage(w, r)
+		return
+	}
 	http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 }
 func (a *App) selectVault(w http.ResponseWriter, r *http.Request) {
@@ -630,7 +757,7 @@ func (a *App) selectVault(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/vaults/unlock", 303)
 }
 func (a *App) unlockPage(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r)
+	id, s, ok := a.authenticated(r)
 	if !ok {
 		http.Redirect(w, r, "/sign-in", 303)
 		return
@@ -639,9 +766,14 @@ func (a *App) unlockPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/vaults", 303)
 		return
 	}
-	v, _, err := a.vault(r.Context(), s, s.activeVaultID)
+	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
 	if err != nil {
 		http.Error(w, "Unable to load that vault. Please try again.", 500)
+		return
+	}
+	if !owned {
+		a.invalidateActiveHandle(r.Context(), id, s)
+		http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 		return
 	}
 	a.render(w, "unlock", vaultPage{CSRFToken: s.csrfToken, Selected: v})
@@ -710,7 +842,7 @@ func (a *App) browse(w http.ResponseWriter, r *http.Request) {
 // error for the user. The template owns the error presentation so failed entry
 // creation returns the user to the same usable browse screen.
 func (a *App) browseWithErrorStatus(w http.ResponseWriter, r *http.Request, status int, pageError string) {
-	_, s, ok := a.authenticated(r)
+	id, s, ok := a.authenticated(r)
 	if !ok {
 		http.Redirect(w, r, "/sign-in", 303)
 		return
@@ -719,10 +851,21 @@ func (a *App) browseWithErrorStatus(w http.ResponseWriter, r *http.Request, stat
 		http.Redirect(w, r, "/vaults/unlock", 303)
 		return
 	}
+	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
+	if err != nil {
+		http.Error(w, "Unable to load that vault. Please try again.", 500)
+		return
+	}
+	if !owned {
+		a.invalidateActiveHandle(r.Context(), id, s)
+		http.Redirect(w, r, "/vaults", http.StatusSeeOther)
+		return
+	}
 	entries, err := a.sessionVaults.DecodedEntries(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to load decoded vault entries.", 500); return }
-	v, _, err := a.vault(r.Context(), s, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to load that vault. Please try again.", 500); return }
+	if err != nil {
+		http.Error(w, "Unable to load decoded vault entries.", 500)
+		return
+	}
 	a.renderStatus(w, status, "browse", struct {
 		vaultPage
 		Entries []DecodedEntry
@@ -730,72 +873,180 @@ func (a *App) browseWithErrorStatus(w http.ResponseWriter, r *http.Request, stat
 }
 func (a *App) syncDecodedEntries(ctx context.Context, s session, handle string) error {
 	request := privateclient.HandleRequest{Handle: handle, UserID: s.userID, VaultID: s.activeVaultID}
-	groups, err := a.rust.Groups(ctx, request); if err != nil { return err }
-	var root privateclient.Group; if err := json.Unmarshal(groups.Groups, &root); err != nil { return err }
+	groups, err := a.rust.Groups(ctx, request)
+	if err != nil {
+		return err
+	}
+	var root privateclient.Group
+	if err := json.Unmarshal(groups.Groups, &root); err != nil {
+		return err
+	}
 	var out []DecodedEntry
 	var walk func(privateclient.Group) error
 	walk = func(g privateclient.Group) error {
-		batch, err := a.rust.GroupEntries(ctx, request, g.ID); if err != nil { return err }
+		batch, err := a.rust.GroupEntries(ctx, request, g.ID)
+		if err != nil {
+			return err
+		}
 		for _, summary := range batch.Entries {
-			detail, err := a.rust.Entry(ctx, request, summary.ID); if err != nil { return err }
+			detail, err := a.rust.Entry(ctx, request, summary.ID)
+			if err != nil {
+				return err
+			}
 			e := DecodedEntry{EntryID: detail.ID, GroupID: g.ID, Fields: map[string]string{}}
-			if detail.Title != nil { e.Title = *detail.Title }; if detail.Username != nil { e.Username = *detail.Username }; if detail.URL != nil { e.URL = *detail.URL }; if detail.Notes != nil { e.Notes = *detail.Notes }
-			for k, v := range detail.Strings { if v != nil { e.Fields[k] = *v } }
-			for k := range detail.Protected { value, err := a.rust.Reveal(ctx, request, detail.ID, k); if err != nil { return err }; if k == "Password" { e.Password = value.Value } else { e.Fields[k] = value.Value } }
+			if detail.Title != nil {
+				e.Title = *detail.Title
+			}
+			if detail.Username != nil {
+				e.Username = *detail.Username
+			}
+			if detail.URL != nil {
+				e.URL = *detail.URL
+			}
+			if detail.Notes != nil {
+				e.Notes = *detail.Notes
+			}
+			for k, v := range detail.Strings {
+				if v != nil {
+					e.Fields[k] = *v
+				}
+			}
+			for k := range detail.Protected {
+				value, err := a.rust.Reveal(ctx, request, detail.ID, k)
+				if err != nil {
+					return err
+				}
+				if k == "Password" {
+					e.Password = value.Value
+				} else {
+					e.Fields[k] = value.Value
+				}
+			}
 			out = append(out, e)
 		}
-		for _, child := range g.Children { if err := walk(child); err != nil { return err } }; return nil
+		for _, child := range g.Children {
+			if err := walk(child); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	if err := walk(root); err != nil { return err }
+	if err := walk(root); err != nil {
+		return err
+	}
 	return a.sessionVaults.ReplaceDecodedEntries(ctx, s.userID, s.accessToken, s.activeVaultID, out)
 }
 func (a *App) updateEntry(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r); if !ok { http.Redirect(w, r, "/sign-in", 303); return }
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", 303)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxKeyFileBytes+(1<<20))
-	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil { http.Error(w, "Invalid save form.", http.StatusBadRequest); return }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", 403); return }
-	if s.activeVaultID == "" || strings.TrimSpace(r.Form.Get("entry_id")) == "" { http.Error(w, "Select and unlock a vault before editing an entry.", http.StatusBadRequest); return }
+	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil {
+		http.Error(w, "Invalid save form.", http.StatusBadRequest)
+		return
+	}
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", 403)
+		return
+	}
+	if s.activeVaultID == "" || strings.TrimSpace(r.Form.Get("entry_id")) == "" {
+		http.Error(w, "Select and unlock a vault before editing an entry.", http.StatusBadRequest)
+		return
+	}
 	e := DecodedEntry{EntryID: r.Form.Get("entry_id"), Title: r.Form.Get("title"), Username: r.Form.Get("username"), Password: r.Form.Get("password"), URL: r.Form.Get("url"), Notes: r.Form.Get("notes"), Fields: map[string]string{}}
 	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
-	if err != nil || !owned || a.sessionVaults == nil || a.rust == nil { http.Error(w, "Unable to save entry.", 503); return }
+	if err != nil || !owned || a.sessionVaults == nil || a.rust == nil {
+		http.Error(w, "Unable to save entry.", 503)
+		return
+	}
 	var masterPassword *string
-	if value := r.Form.Get("master_password"); value != "" { masterPassword = &value }
+	if value := r.Form.Get("master_password"); value != "" {
+		masterPassword = &value
+	}
 	var keyfileB64 *string
 	if file, _, err := r.FormFile("key_file"); err == nil {
 		defer file.Close()
 		raw, readErr := io.ReadAll(io.LimitReader(file, maxKeyFileBytes+1))
-		if readErr != nil || len(raw) > maxKeyFileBytes { http.Error(w, "Key file is too large.", http.StatusBadRequest); return }
-		encoded := base64.StdEncoding.EncodeToString(raw); keyfileB64 = &encoded
+		if readErr != nil || len(raw) > maxKeyFileBytes {
+			http.Error(w, "Key file is too large.", http.StatusBadRequest)
+			return
+		}
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		keyfileB64 = &encoded
 	}
 	updated, err := a.rust.Update(r.Context(), privateclient.UpdateRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID, EntryID: e.EntryID, Title: e.Title, Username: e.Username, Password: e.Password, URL: e.URL, Notes: e.Notes, MasterPassword: masterPassword, KeyfileB64: keyfileB64})
-	if err != nil { http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity); return }
+	if err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity)
+		return
+	}
 	vaultBytes, err := base64.StdEncoding.DecodeString(updated.DatabaseB64)
-	if err != nil || len(vaultBytes) == 0 || len(vaultBytes) > maxVaultBytes { http.Error(w, "Unable to save the vault.", 500); return }
-	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", 502); return }
-	if err := a.syncDecodedEntries(r.Context(), s, s.activeHandle); err != nil { http.Error(w, "Vault saved but the decoded mirror could not be refreshed.", 502); return }
+	if err != nil || len(vaultBytes) == 0 || len(vaultBytes) > maxVaultBytes {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Unable to save the vault.", 500)
+		return
+	}
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault changed but could not be stored. Please try saving again.", 502)
+		return
+	}
+	if err := a.syncDecodedEntries(r.Context(), s, s.activeHandle); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault saved but the decoded mirror could not be refreshed.", 502)
+		return
+	}
 	http.Redirect(w, r, "/vaults/browse", 303)
 }
 func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", 303); return }
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", 303)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxKeyFileBytes+(1<<20))
-	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil { http.Error(w, "Invalid save form.", http.StatusBadRequest); return }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", 403); return }
-	if s.activeVaultID == "" || s.activeHandle == "" { http.Error(w, "Unlock a vault before adding an entry.", http.StatusBadRequest); return }
+	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil {
+		http.Error(w, "Invalid save form.", http.StatusBadRequest)
+		return
+	}
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", 403)
+		return
+	}
+	if s.activeVaultID == "" || s.activeHandle == "" {
+		http.Error(w, "Unlock a vault before adding an entry.", http.StatusBadRequest)
+		return
+	}
 	title := r.Form.Get("title")
-	if strings.TrimSpace(title) == "" { http.Error(w, "Give the new entry a title.", http.StatusBadRequest); return }
+	if strings.TrimSpace(title) == "" {
+		http.Error(w, "Give the new entry a title.", http.StatusBadRequest)
+		return
+	}
 	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
-	if err != nil || !owned || a.sessionVaults == nil || a.rust == nil { http.Error(w, "Unable to save entry.", 503); return }
+	if err != nil || !owned || a.sessionVaults == nil || a.rust == nil {
+		http.Error(w, "Unable to save entry.", 503)
+		return
+	}
 	var groupID *string
-	if value := strings.TrimSpace(r.Form.Get("group_id")); value != "" { groupID = &value }
+	if value := strings.TrimSpace(r.Form.Get("group_id")); value != "" {
+		groupID = &value
+	}
 	var masterPassword *string
-	if value := r.Form.Get("master_password"); value != "" { masterPassword = &value }
+	if value := r.Form.Get("master_password"); value != "" {
+		masterPassword = &value
+	}
 	var keyfileB64 *string
 	if file, _, err := r.FormFile("key_file"); err == nil {
 		defer file.Close()
 		raw, readErr := io.ReadAll(io.LimitReader(file, maxKeyFileBytes+1))
-		if readErr != nil || len(raw) > maxKeyFileBytes { http.Error(w, "Key file is too large.", http.StatusBadRequest); return }
-		encoded := base64.StdEncoding.EncodeToString(raw); keyfileB64 = &encoded
+		if readErr != nil || len(raw) > maxKeyFileBytes {
+			http.Error(w, "Key file is too large.", http.StatusBadRequest)
+			return
+		}
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		keyfileB64 = &encoded
 	}
 	created, err := a.rust.CreateEntry(r.Context(), privateclient.CreateEntryRequest{
 		Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID, GroupID: groupID,
@@ -803,104 +1054,261 @@ func (a *App) createEntry(w http.ResponseWriter, r *http.Request) {
 		MasterPassword: masterPassword, KeyfileB64: keyfileB64,
 	})
 	if err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
 		a.browseWithErrorStatus(w, r, http.StatusUnprocessableEntity, "Unable to save the vault. Check the master password or key file.")
 		return
 	}
 	vaultBytes, err := base64.StdEncoding.DecodeString(created.DatabaseB64)
-	if err != nil || len(vaultBytes) == 0 || len(vaultBytes) > maxVaultBytes { http.Error(w, "Unable to save the vault.", 500); return }
-	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", 502); return }
-	if err := a.syncDecodedEntries(r.Context(), s, s.activeHandle); err != nil { http.Error(w, "Vault saved but the decoded mirror could not be refreshed.", 502); return }
+	if err != nil || len(vaultBytes) == 0 || len(vaultBytes) > maxVaultBytes {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Unable to save the vault.", 500)
+		return
+	}
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault changed but could not be stored. Please try saving again.", 502)
+		return
+	}
+	if err := a.syncDecodedEntries(r.Context(), s, s.activeHandle); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault saved but the decoded mirror could not be refreshed.", 502)
+		return
+	}
 	http.Redirect(w, r, "/vaults/browse", 303)
 }
 func (a *App) trashEntry(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if !a.parseEntryMultipart(w, r, s) { return }
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
+	if !a.parseEntryMultipart(w, r, s) {
+		return
+	}
 	entryID := strings.TrimSpace(r.Form.Get("entry_id"))
-	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" { http.Error(w, "Unlock a vault and select an entry before deleting it.", http.StatusBadRequest); return }
+	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" {
+		http.Error(w, "Unlock a vault and select an entry before deleting it.", http.StatusBadRequest)
+		return
+	}
 	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
-	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil || a.rust == nil { http.Error(w, "Entry deletion is unavailable.", http.StatusServiceUnavailable); return }
+	if err != nil {
+		http.Error(w, "Unable to delete entry.", http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil || a.rust == nil {
+		http.Error(w, "Entry deletion is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	masterPassword, keyfileB64, ok := entryCredentials(w, r)
-	if !ok { return }
-	activeEntries, err := a.sessionVaults.DecodedEntries(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
-	if _, found := findEntry(activeEntries, entryID); !found {
+	if !ok {
+		return
+	}
+	_, found, err := a.sessionVaults.BeginTrashEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID)
+	if err != nil {
+		http.Error(w, "Unable to delete entry.", http.StatusInternalServerError)
+		return
+	}
+	if !found {
 		trashedEntries, listErr := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-		if listErr != nil { http.Error(w, "Unable to delete entry.", http.StatusInternalServerError); return }
-		if _, trashed := findEntry(trashedEntries, entryID); trashed { http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther); return }
-		http.Error(w, "Entry not found.", http.StatusNotFound); return
+		if listErr != nil {
+			http.Error(w, "Unable to delete entry.", http.StatusInternalServerError)
+			return
+		}
+		if _, trashed := findEntry(trashedEntries, entryID); trashed {
+			http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "Entry not found.", http.StatusNotFound)
+		return
 	}
 	deleted, err := a.rust.DeleteEntry(r.Context(), privateclient.DeleteEntryRequest{HandleRequest: privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID}, EntryID: entryID, MasterPassword: masterPassword, KeyfileB64: keyfileB64})
-	if err != nil { http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity); return }
+	if err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "trashing")
+		http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity)
+		return
+	}
 	vaultBytes, ok := decodedVaultBytes(w, deleted.DatabaseB64)
-	if !ok { return }
-	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway); return }
-	if err := a.sessionVaults.TrashEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil { http.Error(w, "Vault saved but the entry could not be moved to trash.", http.StatusBadGateway); return }
+	if !ok {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "trashing")
+		return
+	}
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "trashing")
+		http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway)
+		return
+	}
+	if err := a.sessionVaults.TrashEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault saved but the entry could not be moved to trash. Please retry the deletion.", http.StatusBadGateway)
+		return
+	}
 	http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
 }
 func (a *App) trashedEntries(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if s.activeVaultID == "" { http.Error(w, "Select a vault before viewing entry trash.", http.StatusBadRequest); return }
-	if a.sessionVaults == nil { http.Error(w, "Entry trash is unavailable.", http.StatusServiceUnavailable); return }
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
+	if s.activeVaultID == "" {
+		http.Error(w, "Select a vault before viewing entry trash.", http.StatusBadRequest)
+		return
+	}
+	if a.sessionVaults == nil {
+		http.Error(w, "Entry trash is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
+	selected, owned, err := a.vault(r.Context(), s, s.activeVaultID)
+	if err != nil {
+		http.Error(w, "Unable to load entry trash. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		a.invalidateActiveHandle(r.Context(), id, s)
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
 	entries, err := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to load entry trash. Please try again.", http.StatusInternalServerError); return }
-	type entryTombstone struct { EntryID string `json:"entry_id"`; Title string `json:"title"`; Username string `json:"username"`; TrashedAt *time.Time `json:"trashed_at"`; PurgeAfter *time.Time `json:"purge_after"` }
+	if err != nil {
+		http.Error(w, "Unable to load entry trash. Please try again.", http.StatusInternalServerError)
+		return
+	}
+	if wantsHTML(r) {
+		a.render(w, "entry-trash", entryTrashPage{
+			vaultPage: vaultPage{CSRFToken: s.csrfToken, Selected: selected, Email: s.email},
+			Entries:   entries,
+		})
+		return
+	}
+	type entryTombstone struct {
+		EntryID    string     `json:"entry_id"`
+		Title      string     `json:"title"`
+		Username   string     `json:"username"`
+		TrashedAt  *time.Time `json:"trashed_at"`
+		PurgeAfter *time.Time `json:"purge_after"`
+	}
 	out := make([]entryTombstone, len(entries))
-	for i, e := range entries { out[i] = entryTombstone{EntryID: e.EntryID, Title: e.Title, Username: e.Username, TrashedAt: e.TrashedAt, PurgeAfter: e.PurgeAfter} }
+	for i, e := range entries {
+		out[i] = entryTombstone{EntryID: e.EntryID, Title: e.Title, Username: e.Username, TrashedAt: e.TrashedAt, PurgeAfter: e.PurgeAfter}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(out)
 }
 func (a *App) restoreEntry(w http.ResponseWriter, r *http.Request) {
-	_, s, ok := a.authenticated(r)
-	if !ok { http.Redirect(w, r, "/sign-in", http.StatusSeeOther); return }
-	if !a.parseEntryMultipart(w, r, s) { return }
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", http.StatusSeeOther)
+		return
+	}
+	if !a.parseEntryMultipart(w, r, s) {
+		return
+	}
 	entryID := strings.TrimSpace(r.Form.Get("entry_id"))
-	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" { http.Error(w, "Unlock a vault and select an entry before restoring it.", http.StatusBadRequest); return }
+	if s.activeVaultID == "" || s.activeHandle == "" || entryID == "" {
+		http.Error(w, "Unlock a vault and select an entry before restoring it.", http.StatusBadRequest)
+		return
+	}
 	v, owned, err := a.vault(r.Context(), s, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
-	if !owned { http.Error(w, "Vault not found.", http.StatusNotFound); return }
-	if a.sessionVaults == nil || a.rust == nil { http.Error(w, "Entry restore is unavailable.", http.StatusServiceUnavailable); return }
+	if err != nil {
+		http.Error(w, "Unable to restore entry.", http.StatusInternalServerError)
+		return
+	}
+	if !owned {
+		http.Error(w, "Vault not found.", http.StatusNotFound)
+		return
+	}
+	if a.sessionVaults == nil || a.rust == nil {
+		http.Error(w, "Entry restore is unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	masterPassword, keyfileB64, ok := entryCredentials(w, r)
-	if !ok { return }
-	entries, err := a.sessionVaults.TrashedEntriesForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-	if err != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
-	entry, found := findEntry(entries, entryID)
+	if !ok {
+		return
+	}
+	entry, found, err := a.sessionVaults.BeginRestoreEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID)
+	if err != nil {
+		http.Error(w, "Unable to restore entry.", http.StatusInternalServerError)
+		return
+	}
 	if !found {
 		activeEntries, listErr := a.sessionVaults.DecodedEntries(r.Context(), s.userID, s.accessToken, s.activeVaultID)
-		if listErr != nil { http.Error(w, "Unable to restore entry.", http.StatusInternalServerError); return }
-		if _, active := findEntry(activeEntries, entryID); active { http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther); return }
-		http.Error(w, "Entry not found.", http.StatusNotFound); return
+		if listErr != nil {
+			http.Error(w, "Unable to restore entry.", http.StatusInternalServerError)
+			return
+		}
+		if _, active := findEntry(activeEntries, entryID); active {
+			http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
+			return
+		}
+		http.Error(w, "Entry not found.", http.StatusNotFound)
+		return
 	}
 	// The Rust service restores the KDBX tombstone itself. The browser-facing
 	// service must not send a decoded tombstone's secret fields back over this
 	// private request; only the original group preference and credentials are needed.
 	var groupID *string
-	if entry.GroupID != "" { groupID = &entry.GroupID }
+	if entry.GroupID != "" {
+		groupID = &entry.GroupID
+	}
 	restored, err := a.rust.RestoreEntry(r.Context(), privateclient.RestoreEntryRequest{HandleRequest: privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID}, EntryID: entryID, PreferredGroupID: groupID, MasterPassword: masterPassword, KeyfileB64: keyfileB64})
-	if err != nil { http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity); return }
+	if err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "restoring")
+		http.Error(w, "Unable to save the vault. Check the master password or key file.", http.StatusUnprocessableEntity)
+		return
+	}
 	vaultBytes, ok := decodedVaultBytes(w, restored.DatabaseB64)
-	if !ok { return }
-	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil { http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway); return }
-	if err := a.sessionVaults.RestoreEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil { http.Error(w, "Vault saved but the entry could not be restored from trash.", http.StatusBadGateway); return }
+	if !ok {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "restoring")
+		return
+	}
+	if err := a.sessionVaults.ReplaceForSession(r.Context(), s.userID, s.accessToken, v, vaultBytes); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		_ = a.sessionVaults.AbortEntryTransitionForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID, "restoring")
+		http.Error(w, "Vault changed but could not be stored. Please try saving again.", http.StatusBadGateway)
+		return
+	}
+	if err := a.sessionVaults.RestoreEntryForSession(r.Context(), s.userID, s.accessToken, s.activeVaultID, entryID); err != nil {
+		a.recoverMutationHandle(r.Context(), id, s, v, masterPassword, keyfileB64)
+		http.Error(w, "Vault saved but the entry could not be restored from trash. Please retry the restore.", http.StatusBadGateway)
+		return
+	}
 	http.Redirect(w, r, "/vaults/browse", http.StatusSeeOther)
 }
 func (a *App) parseEntryMultipart(w http.ResponseWriter, r *http.Request, s session) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, maxKeyFileBytes+(1<<20))
-	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil { http.Error(w, "Invalid save form.", http.StatusBadRequest); return false }
-	if !a.validCSRF(r, s) { http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden); return false }
+	if err := r.ParseMultipartForm(maxKeyFileBytes + 1); err != nil {
+		http.Error(w, "Invalid save form.", http.StatusBadRequest)
+		return false
+	}
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", http.StatusForbidden)
+		return false
+	}
 	return true
 }
 func entryCredentials(w http.ResponseWriter, r *http.Request) (*string, *string, bool) {
 	password := r.Form.Get("master_password")
-	if password == "" { http.Error(w, "Enter the master password to change this entry.", http.StatusBadRequest); return nil, nil, false }
+	if password == "" {
+		http.Error(w, "Enter the master password to change this entry.", http.StatusBadRequest)
+		return nil, nil, false
+	}
 	var keyfileB64 *string
 	if file, _, err := r.FormFile("key_file"); err == nil {
 		defer file.Close()
 		raw, readErr := io.ReadAll(io.LimitReader(file, maxKeyFileBytes+1))
-		if readErr != nil || len(raw) > maxKeyFileBytes { http.Error(w, "Key file is too large.", http.StatusBadRequest); return nil, nil, false }
+		if readErr != nil || len(raw) > maxKeyFileBytes {
+			http.Error(w, "Key file is too large.", http.StatusBadRequest)
+			return nil, nil, false
+		}
 		encoded := base64.StdEncoding.EncodeToString(raw)
 		keyfileB64 = &encoded
 	}
@@ -908,20 +1316,74 @@ func entryCredentials(w http.ResponseWriter, r *http.Request) (*string, *string,
 }
 func decodedVaultBytes(w http.ResponseWriter, encoded string) ([]byte, bool) {
 	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(data) == 0 || len(data) > maxVaultBytes { http.Error(w, "Unable to save the vault.", http.StatusInternalServerError); return nil, false }
+	if err != nil || len(data) == 0 || len(data) > maxVaultBytes {
+		http.Error(w, "Unable to save the vault.", http.StatusInternalServerError)
+		return nil, false
+	}
 	return data, true
 }
+
+func (a *App) recoverMutationHandle(ctx context.Context, sessionID string, s session, v Vault, password, keyfileB64 *string) {
+	if a.rust == nil || a.sessionVaults == nil {
+		a.invalidateActiveHandle(ctx, sessionID, s)
+		return
+	}
+	_ = a.rust.Close(ctx, privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID})
+	data, err := a.sessionVaults.DownloadForSession(ctx, s.userID, s.accessToken, v)
+	if err != nil {
+		a.invalidateActiveHandle(ctx, sessionID, s)
+		return
+	}
+	unlocked, err := a.rust.Unlock(ctx, privateclient.UnlockRequest{
+		UserID: s.userID, VaultID: s.activeVaultID, DatabaseB64: base64.StdEncoding.EncodeToString(data),
+		Password: password, KeyfileB64: keyfileB64,
+	})
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	current, exists := a.sessions[sessionID]
+	if !exists || current.activeHandle != s.activeHandle {
+		return
+	}
+	if err != nil {
+		current.activeHandle = ""
+	} else {
+		current.activeHandle = unlocked.Handle
+	}
+	a.sessions[sessionID] = current
+}
+
+func (a *App) invalidateActiveHandle(ctx context.Context, sessionID string, s session) {
+	if a.rust != nil && s.activeHandle != "" {
+		_ = a.rust.Close(ctx, privateclient.HandleRequest{Handle: s.activeHandle, UserID: s.userID, VaultID: s.activeVaultID})
+	}
+	a.mu.Lock()
+	if current, ok := a.sessions[sessionID]; ok && current.activeHandle == s.activeHandle {
+		current.activeHandle, current.activeVaultID = "", ""
+		a.sessions[sessionID] = current
+	}
+	a.mu.Unlock()
+}
 func containsVault(vaults []Vault, id string) bool {
-	for _, vault := range vaults { if vault.ID == id { return true } }
+	for _, vault := range vaults {
+		if vault.ID == id {
+			return true
+		}
+	}
 	return false
 }
 func findEntry(entries []DecodedEntry, id string) (DecodedEntry, bool) {
-	for _, entry := range entries { if entry.EntryID == id { return entry, true } }
+	for _, entry := range entries {
+		if entry.EntryID == id {
+			return entry, true
+		}
+	}
 	return DecodedEntry{}, false
 }
 func downloadFilename(name string) string {
 	name = strings.TrimSpace(name)
-	if strings.HasSuffix(strings.ToLower(name), ".kdbx") { name = name[:len(name)-len(".kdbx")] }
+	if strings.HasSuffix(strings.ToLower(name), ".kdbx") {
+		name = name[:len(name)-len(".kdbx")]
+	}
 	var safe strings.Builder
 	for _, r := range name {
 		switch {
@@ -932,7 +1394,9 @@ func downloadFilename(name string) string {
 		}
 	}
 	name = strings.Trim(safe.String(), " .")
-	if name == "" { name = "vault" }
+	if name == "" {
+		name = "vault"
+	}
 	return name + ".kdbx"
 }
 func (a *App) closeVault(w http.ResponseWriter, r *http.Request) {
@@ -1030,6 +1494,7 @@ func (a *App) renderStatus(w http.ResponseWriter, status int, name string, data 
 		http.Error(w, "Unable to render this page.", 500)
 	}
 }
+
 // templatesGlob locates frontend/templates relative to the process's working
 // directory, walking up from cwd when needed (e.g. under `go test`, which
 // runs with cwd set to the package directory rather than the repo root). In
@@ -1052,6 +1517,9 @@ func templatesGlob() string {
 	}
 }
 func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
+func wantsHTML(r *http.Request) bool {
+	return strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/html")
+}
 func bearer(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 }
@@ -1082,6 +1550,34 @@ type vaultPage struct {
 	SupabaseURL     string
 	SupabaseAnonKey string
 	Error           string
+}
+
+type vaultTrashPage struct {
+	vaultPage
+	TrashedVaults []Vault
+}
+
+type entryTrashPage struct {
+	vaultPage
+	Entries []DecodedEntry
+}
+
+func formatDate(value *time.Time) string {
+	if value == nil {
+		return "—"
+	}
+	return value.UTC().Format("Jan 2, 2006")
+}
+
+func templateDict(values ...any) map[string]any {
+	result := make(map[string]any, len(values)/2)
+	for i := 0; i+1 < len(values); i += 2 {
+		key, ok := values[i].(string)
+		if ok {
+			result[key] = values[i+1]
+		}
+	}
+	return result
 }
 
 // SupabaseVaults adapts the REST/storage client without leaking its types into handlers.
@@ -1117,7 +1613,9 @@ func (s SupabaseVaults) ReplaceDecodedEntries(c context.Context, u, t, vaultID s
 }
 func (s SupabaseVaults) DecodedEntries(c context.Context, u, t, vaultID string) ([]DecodedEntry, error) {
 	rows, err := s.Client.DecodedEntries(c, t, u, vaultID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	entries := make([]DecodedEntry, len(rows))
 	for i, row := range rows {
 		entries[i] = DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields, TrashedAt: row.TrashedAt, PurgeAfter: row.PurgeAfter}
@@ -1146,14 +1644,30 @@ func (s SupabaseVaults) TrashEntryForSession(c context.Context, u, t, vaultID, e
 func (s SupabaseVaults) RestoreEntryForSession(c context.Context, u, t, vaultID, entryID string) error {
 	return s.Client.RestoreEntry(c, t, u, vaultID, entryID)
 }
+func (s SupabaseVaults) BeginTrashEntryForSession(c context.Context, u, t, vaultID, entryID string) (DecodedEntry, bool, error) {
+	row, ok, err := s.Client.BeginTrashEntry(c, t, u, vaultID, entryID)
+	return fromDecodedEntry(row), ok, err
+}
+func (s SupabaseVaults) BeginRestoreEntryForSession(c context.Context, u, t, vaultID, entryID string) (DecodedEntry, bool, error) {
+	row, ok, err := s.Client.BeginRestoreEntry(c, t, u, vaultID, entryID)
+	return fromDecodedEntry(row), ok, err
+}
+func (s SupabaseVaults) AbortEntryTransitionForSession(c context.Context, u, t, vaultID, entryID, transition string) error {
+	return s.Client.AbortEntryTransition(c, t, u, vaultID, entryID, transition)
+}
 func (s SupabaseVaults) TrashedEntriesForSession(c context.Context, u, t, vaultID string) ([]DecodedEntry, error) {
 	rows, err := s.Client.ListTrashedEntries(c, t, u, vaultID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	entries := make([]DecodedEntry, len(rows))
 	for i, row := range rows {
-		entries[i] = DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields, TrashedAt: row.TrashedAt, PurgeAfter: row.PurgeAfter}
+		entries[i] = fromDecodedEntry(row)
 	}
 	return entries, nil
+}
+func fromDecodedEntry(row supabase.DecodedEntry) DecodedEntry {
+	return DecodedEntry{EntryID: row.EntryID, GroupID: row.GroupID, Title: row.Title, Username: row.Username, Password: row.Password, URL: row.URL, Notes: row.Notes, Fields: row.Fields, TrashedAt: row.TrashedAt, PurgeAfter: row.PurgeAfter}
 }
 func fromSupabase(vs []supabase.Vault) []Vault {
 	out := make([]Vault, len(vs))
@@ -1162,6 +1676,8 @@ func fromSupabase(vs []supabase.Vault) []Vault {
 	}
 	return out
 }
-func fromOne(v supabase.Vault) Vault { return Vault{ID: v.ID, Name: v.Name, ObjectPath: v.ObjectPath, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter} }
+func fromOne(v supabase.Vault) Vault {
+	return Vault{ID: v.ID, Name: v.Name, ObjectPath: v.ObjectPath, TrashedAt: v.TrashedAt, PurgeAfter: v.PurgeAfter}
+}
 
 var _ = json.RawMessage{}

@@ -1,6 +1,6 @@
 begin;
 
-select plan(21);
+select plan(33);
 
 select has_table('public', 'vaults', 'vault metadata is stored in public.vaults');
 select has_column('public', 'vaults', 'owner_id', 'vaults record their owner');
@@ -144,6 +144,88 @@ select throws_ok(
   '23503',
   'Remove the associated Storage object through the Storage API before deleting vault metadata.',
   'vault metadata cannot be deleted while its Storage object exists'
+);
+
+select has_column('public', 'vaults', 'lifecycle_state', 'vaults have an explicit lifecycle state');
+select has_column('public', 'vaults', 'revision', 'vaults have a revision fencing token');
+select has_column('public', 'decoded_vault_entries', 'lifecycle_state', 'decoded entries have an explicit lifecycle state');
+select has_column('public', 'decoded_vault_entries', 'transition_state', 'decoded entries have a retryable transition state');
+
+select is(
+  (select lifecycle_state from public.vaults where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
+  'active',
+  'new vaults begin active'
+);
+select is(
+  (select revision from public.vaults where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
+  1::bigint,
+  'new vaults begin at revision one'
+);
+
+select throws_ok(
+  $$update public.vaults
+    set lifecycle_state = 'trashed', trashed_at = now(), purge_after = null
+    where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'$$,
+  '23514', null,
+  'a trashed vault requires a purge deadline'
+);
+
+insert into public.decoded_vault_entries (vault_id, owner_id, entry_id, group_id, title)
+values (
+  'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  '11111111-1111-1111-1111-111111111111',
+  'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+  'cccccccc-cccc-cccc-cccc-cccccccccccc',
+  'Lifecycle entry'
+);
+
+select throws_ok(
+  $$update public.decoded_vault_entries
+    set lifecycle_state = 'trashed', trashed_at = now(), purge_after = null
+    where vault_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+      and entry_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'$$,
+  '23514', null,
+  'a trashed decoded entry requires a purge deadline'
+);
+
+update public.vaults
+set lifecycle_state = 'trashed',
+    trashed_at = timezone('utc', now()),
+    purge_after = timezone('utc', now()) + interval '30 days'
+where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+select is(
+  (select revision from public.vaults where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'),
+  2::bigint,
+  'a trash transition increments the vault revision'
+);
+select is_empty(
+  $$update public.decoded_vault_entries set title = 'blocked while parent is trashed'
+    where vault_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+      and entry_id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+    returning entry_id$$,
+  'entry mutation is blocked while its parent vault is trashed'
+);
+
+update public.vaults
+set lifecycle_state = 'purging'
+where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+select is_empty(
+  $$update public.vaults
+    set lifecycle_state = 'active', trashed_at = null, purge_after = null
+    where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+      and lifecycle_state = 'trashed'
+    returning id$$,
+  'a purging vault cannot be restored through the trashed transition'
+);
+select throws_ok(
+  $$update public.vaults
+    set lifecycle_state = 'active', trashed_at = null, purge_after = null
+    where id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'$$,
+  '23514',
+  'Invalid vault lifecycle transition.',
+  'the database rejects a direct purging-to-active transition'
 );
 
 reset role;

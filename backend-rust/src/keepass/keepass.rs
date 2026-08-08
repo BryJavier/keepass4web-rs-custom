@@ -330,8 +330,12 @@ impl KeePass {
     /// original group UUID. Moving rather than recreating preserves the UUID,
     /// fields, protected values, binaries, and other native metadata.
     pub fn delete_entry(&mut self, entry_id: Uuid) -> Result<Uuid> {
-        let (entry, original_group_id) = Self::take_active_entry(&mut self.db.root, &entry_id)
-            .ok_or_else(|| anyhow!("entry not found"))?;
+        let Some((entry, original_group_id)) = Self::take_active_entry(&mut self.db.root, &entry_id) else {
+            if Self::tombstoned_entry_exists(&self.db.root, &entry_id) {
+                return Ok(self.db.root.uuid);
+            }
+            return Err(anyhow!("entry not found"));
+        };
         Self::tombstone_group_mut(&mut self.db.root).add_child(entry);
         Ok(original_group_id)
     }
@@ -339,8 +343,12 @@ impl KeePass {
     /// Restores a tombstoned KDBX entry. If its preferred group no longer
     /// exists, restore directly into the root group instead.
     pub fn restore_entry(&mut self, entry_id: Uuid, preferred_group_id: Option<Uuid>) -> Result<()> {
-        let entry = Self::take_tombstoned_entry(&mut self.db.root, &entry_id)
-            .ok_or_else(|| anyhow!("tombstoned entry not found"))?;
+        let Some(entry) = Self::take_tombstoned_entry(&mut self.db.root, &entry_id) else {
+            if Self::find_entry_by_id(&self.db.root, &entry_id).is_some() {
+                return Ok(());
+            }
+            return Err(anyhow!("tombstoned entry not found"));
+        };
         let mut entry = Some(entry);
         let restored_to_preferred_group = preferred_group_id.map(|group_id| {
             Self::add_entry_to_active_group(&mut self.db.root, &group_id, &mut entry)
@@ -572,6 +580,15 @@ impl KeePass {
         Some(entry)
     }
 
+    fn tombstoned_entry_exists(root: &keepass::db::Group, id: &Uuid) -> bool {
+        root.children.iter().any(|node| match node {
+            Node::Group(group) if Self::is_tombstone_group(group) => group.children.iter().any(|child| {
+                matches!(child, Node::Entry(entry) if &entry.uuid == id)
+            }),
+            _ => false,
+        })
+    }
+
     fn add_entry_to_active_group(group: &mut keepass::db::Group, id: &Uuid, entry: &mut Option<keepass::db::Entry>) -> bool {
         if &group.uuid == id && !Self::is_tombstone_group(group) {
             group.add_child(entry.take().expect("entry must be available for restoration"));
@@ -777,6 +794,22 @@ mod tests {
         assert_eq!(restored.id, entry_id);
         assert_eq!(restored.title.as_deref(), Some("Recover me"));
         assert_eq!(restored.notes.as_deref(), Some("custom fields must survive"));
+    }
+
+    #[tokio::test]
+    async fn entry_trash_and_restore_are_idempotent_for_transition_retries() {
+        let config = Config::default();
+        let mut database = KeePass::new_empty(&config);
+        let entry_id = database.create_entry(None, EntryUpdate {
+            title: "Retry me".to_owned(), username: "alice".to_owned(), password: "hunter2".to_owned(),
+            url: "https://example.test".to_owned(), notes: "note".to_owned(),
+        }).unwrap();
+
+        let original_group = database.delete_entry(entry_id).unwrap();
+        assert!(database.delete_entry(entry_id).is_ok());
+        database.restore_entry(entry_id, Some(original_group)).unwrap();
+        assert!(database.restore_entry(entry_id, Some(original_group)).is_ok());
+        assert!(database.get_entry_by_id(entry_id).is_ok());
     }
 
     #[tokio::test]

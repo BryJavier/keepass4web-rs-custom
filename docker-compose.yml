@@ -27,6 +27,8 @@ services:
       SUPABASE_URL: ${SUPABASE_URL:-http://localhost:54321}
       SUPABASE_CONTAINER_URL: ${SUPABASE_CONTAINER_URL:-http://host.docker.internal:54321}
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0}
+      # Server-only: consumed by the Go purge worker and never rendered into HTML.
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-local-development-service-role-key}
       SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-http://host.docker.internal:54321/auth/v1}
       RUST_SERVICE_URL: ${RUST_SERVICE_URL:-http://rust-service:8080}
       RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-local-development-shared-token}

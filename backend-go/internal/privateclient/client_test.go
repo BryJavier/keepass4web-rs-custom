@@ -64,14 +64,9 @@ func TestRestoreEntryPostsPrivateContract(t *testing.T) {
 	preferredGroupID := "group-1"
 
 	response, err := client.RestoreEntry(context.Background(), RestoreEntryRequest{
-		HandleRequest:     HandleRequest{Handle: "handle", UserID: "user-1", VaultID: "vault-1"},
-		EntryID:           "entry-1",
-		PreferredGroupID:  &preferredGroupID,
-		Title:             "Title",
-		Username:          "Username",
-		Password:          "Password",
-		URL:               "https://example.com",
-		Notes:             "Notes",
+		HandleRequest:    HandleRequest{Handle: "handle", UserID: "user-1", VaultID: "vault-1"},
+		EntryID:          "entry-1",
+		PreferredGroupID: &preferredGroupID,
 	})
 	if err != nil {
 		t.Fatalf("RestoreEntry() error = %v", err)
@@ -81,8 +76,7 @@ func TestRestoreEntryPostsPrivateContract(t *testing.T) {
 	}
 	assertJSONEqual(t, transport.body, map[string]any{
 		"handle": "handle", "user_id": "user-1", "vault_id": "vault-1", "entry_id": "entry-1",
-		"preferred_group_id": "group-1", "title": "Title", "username": "Username", "password": "Password",
-		"url": "https://example.com", "notes": "Notes",
+		"preferred_group_id": "group-1",
 	})
 	if response != (RestoreEntryResponse{EntryID: "entry-1", DatabaseB64: "database"}) {
 		t.Fatalf("RestoreEntry() response = %+v", response)

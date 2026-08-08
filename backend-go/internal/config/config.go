@@ -17,10 +17,10 @@ type Config struct {
 	SupabaseJWTIssuer string
 	// SupabaseServiceRoleKey is server-only. It is never passed into browser
 	// configuration or request handlers.
-	SupabaseServiceRoleKey   string
-	VaultTrashPurgeInterval  time.Duration
-	RustServiceURL            string
-	RustServiceToken          string
+	SupabaseServiceRoleKey  string
+	VaultTrashPurgeInterval time.Duration
+	RustServiceURL          string
+	RustServiceToken        string
 	// SupabaseServerURL is what the Go process itself dials to reach Supabase.
 	// It defaults to SupabaseURL (the browser-facing address, correct when
 	// both sides reach Supabase the same way, e.g. a real project over the

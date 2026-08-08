@@ -221,6 +221,10 @@ impl PrivateVaultService {
         }
         let mut database = KeePass::from_enc(&self.config, state.key, state.encrypted)?;
         let result = operation(&mut database);
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        };
         let (key, encrypted) = database.to_enc()?;
         active.insert(request.handle.clone(), VaultState {
             user_id: request.user_id,
@@ -229,7 +233,7 @@ impl PrivateVaultService {
             key,
             encrypted,
         });
-        result
+        Ok(value)
     }
 
     pub async fn groups(&self, request: &HandleRequest) -> Result<GroupsResponse> {
@@ -772,5 +776,25 @@ mod tests {
         }).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_mutation_discards_the_possibly_changed_handle() {
+        let service = super::PrivateVaultService::new(crate::config::config::Config::default());
+        let created = service.create_vault(super::CreateVaultRequest { password: Some("test".to_owned()), keyfile_b64: None }).await.unwrap();
+        let user_id = Uuid::new_v4();
+        let vault_id = Uuid::new_v4();
+        let unlocked = service.unlock(super::UnlockRequest {
+            user_id, vault_id, database_b64: created.database_b64, password: Some("test".to_owned()), keyfile_b64: None,
+        }).await.unwrap();
+        let handle = super::HandleRequest { handle: unlocked.handle, user_id, vault_id };
+
+        let result = service.delete_entry(super::DeleteEntryRequest {
+            handle: super::HandleRequest { handle: handle.handle.clone(), user_id, vault_id },
+            entry_id: Uuid::new_v4(), master_password: Some("test".to_owned()), keyfile_b64: None,
+        }).await;
+
+        assert!(result.is_err());
+        assert!(service.groups(&handle).await.is_err());
     }
 }

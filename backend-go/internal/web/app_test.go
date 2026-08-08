@@ -451,6 +451,35 @@ func TestIdleSweepClosesAnInactiveVaultHandle(t *testing.T) {
 	}
 }
 
+func TestIdleSweepInvalidatesTheBrowserSession(t *testing.T) {
+	rust := &fakeRust{}
+	app := NewApp(Dependencies{Vaults: fakeVaults{}, Rust: rust, IdleTimeout: 20 * time.Millisecond, SweepInterval: 5 * time.Millisecond})
+	cookie := app.CreateSession("owner-1")
+	app.mu.Lock()
+	s := app.sessions[cookie.Value]
+	s.activeHandle, s.activeVaultID = "opaque-handle", "vault-a"
+	s.lastActivity = time.Now().Add(-time.Hour)
+	app.sessions[cookie.Value] = s
+	app.mu.Unlock()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		request := httptest.NewRequest(http.MethodGet, "/session/status", nil)
+		request.AddCookie(cookie)
+		recorder := httptest.NewRecorder()
+		app.ServeHTTP(recorder, request)
+		var status struct { Active bool `json:"active"` }
+		if err := json.NewDecoder(recorder.Body).Decode(&status); err != nil {
+			t.Fatal(err)
+		}
+		if !status.Active {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("idle vault close left the browser session active")
+}
+
 func TestSessionStatusReportsRemainingIdleSeconds(t *testing.T) {
 	app := NewApp(Dependencies{Vaults: fakeVaults{}, IdleTimeout: 60 * time.Second})
 	cookie := app.CreateSession("owner-1")

@@ -165,9 +165,7 @@ func (a *App) closeIdleVaults() {
 		}
 		a.mu.Lock()
 		if current, ok := a.sessions[entry.id]; ok && current.activeHandle == entry.s.activeHandle {
-			current.activeHandle = ""
-			current.activeVaultID = ""
-			a.sessions[entry.id] = current
+			delete(a.sessions, entry.id)
 		}
 		a.mu.Unlock()
 	}

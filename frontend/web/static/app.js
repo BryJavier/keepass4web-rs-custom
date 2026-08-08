@@ -41,6 +41,10 @@
         var res = await fetch('/session/status', { credentials: 'same-origin' });
         if (!res.ok) return;
         var data = await res.json();
+        if (!data.active) {
+          window.location.assign('/sign-in');
+          return;
+        }
         if (data.active && data.vault_active && data.idle_seconds_remaining <= threshold) {
           banner.hidden = false;
           var el = document.getElementById('idle-seconds');

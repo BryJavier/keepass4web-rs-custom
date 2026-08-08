@@ -1,0 +1,98 @@
+{
+  "info": {
+    "_postman_id": "e4cf1269-831a-48bb-9213-7866c8ffb65f",
+    "name": "KeePass4Web — Local Supabase Auth",
+    "description": "Request a local Supabase user access token. Enter your values in the collection variables; the response access token is saved to supabase_access_token.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "supabase_url",
+      "value": "http://127.0.0.1:54321",
+      "type": "string"
+    },
+    {
+      "key": "supabase_anon_key",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "supabase_email",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "supabase_password",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "supabase_access_token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Sign in and save access token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Supabase sign-in succeeds', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const response = pm.response.json();",
+              "pm.collectionVariables.set('supabase_access_token', response.access_token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "apikey",
+            "value": "{{supabase_anon_key}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{supabase_email}}\",\n  \"password\": \"{{supabase_password}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{supabase_url}}/auth/v1/token?grant_type=password",
+          "host": [
+            "{{supabase_url}}"
+          ],
+          "path": [
+            "auth",
+            "v1",
+            "token"
+          ],
+          "query": [
+            {
+              "key": "grant_type",
+              "value": "password"
+            }
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

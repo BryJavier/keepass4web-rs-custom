@@ -1,0 +1,13 @@
+{
+  "source_path": "/Volumes/bryan-ssd/bryan-files/keepass4web-rs-custom/.planning/WORKFLOW.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "HTMX, Go, Rust, and Supabase Implementation Workflow",
+  "summary": "Implementation workflow for a multi-vault KeePass application using Go, HTMX, Tailwind CSS, Supabase, and a private Rust service.",
+  "scope": ["KeePass application", "Go", "HTMX", "Tailwind CSS", "Supabase", "Rust service", "multi-vault", "security", "RLS", "Storage", "HTTP contract"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

@@ -262,10 +262,10 @@ fn auth_and_session() {
     }
 
     for source in [
-        include_str!("../src/auth.rs"),
-        include_str!("../src/session.rs"),
-        include_str!("../src/server/route/auth.rs"),
-        include_str!("../src/server/route/util.rs"),
+        include_str!("../backend-rust/src/auth.rs"),
+        include_str!("../backend-rust/src/session.rs"),
+        include_str!("../backend-rust/src/server/route/auth.rs"),
+        include_str!("../backend-rust/src/server/route/util.rs"),
     ] {
         assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in an auth/session path");
     }
@@ -291,7 +291,7 @@ fn keepass_and_cache() {
             "cache-session-sentinel-01-05",
         ],
     );
-    for source in [include_str!("../src/server/route/keepass.rs"), include_str!("../src/keepass/db_cache.rs")] {
+    for source in [include_str!("../backend-rust/src/server/route/keepass.rs"), include_str!("../backend-rust/src/keepass/db_cache.rs")] {
         assert!(!source.contains("info!(") && !source.contains("error!("), "legacy formatted diagnostic remains in a KeePass/cache path");
     }
 }

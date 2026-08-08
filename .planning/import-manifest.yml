@@ -1,0 +1,5 @@
+docs:
+  - path: .planning/WORKFLOW.md
+    type: DOC
+  - path: docs/superpowers/plans/2026-08-02-htmx-go-rust-supabase.md
+    type: DOC

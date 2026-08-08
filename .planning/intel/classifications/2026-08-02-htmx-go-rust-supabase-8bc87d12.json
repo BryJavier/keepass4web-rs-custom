@@ -1,0 +1,13 @@
+{
+  "source_path": "/Volumes/bryan-ssd/bryan-files/keepass4web-rs-custom/docs/superpowers/plans/2026-08-02-htmx-go-rust-supabase.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": true,
+  "title": "HTMX, Go, Rust, and Supabase Implementation Plan",
+  "summary": "Implementation plan for a server-rendered multi-vault KeePass application using Go, Rust, Supabase, HTMX, and Tailwind.",
+  "scope": ["HTMX", "Go", "Rust", "Supabase", "KeePass", "multi-vault application", "authentication", "storage", "private API", "Tailwind CSS", "Playwright"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

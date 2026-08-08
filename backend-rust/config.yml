@@ -1,0 +1,116 @@
+##################################
+### KeePass4Web related config ###
+##################################
+
+# where to get keepass database from
+# available: Filesystem, HTTP
+db_backend: 'Filesystem'
+
+# backend to authenticate users before anything else
+# available: None, LDAP, OIDC, htpasswd
+# None is only useful in single-user environments
+auth_backend: 'None'
+
+### Database backends ###
+
+# filesystem specific configuration, db_backend = 'Filesystem'
+Filesystem:
+    db_location: './db.kdbx'
+    # optional, storing key files on the filesystem is not recommended
+    # keyfile_location: './db.key'
+
+# http specific configuration, db_backend = 'HTTP'
+HTTP:
+    # database_url: ''
+    # keyfile_url: ''
+    # credentials:
+    #   username: ''
+    #   password: ''
+    # bearer: ''
+
+### Authentication backends ###
+
+# ldap specific configuration, auth_backend = 'LDAP'
+LDAP:
+    uri:    'ldap://127.0.0.1:389'
+    scope:  'subtree'
+    base_dn: 'OU=People,DC=example,DC=org'
+    filter: '(&(objectClass=inetOrgPerson)(memberOf=CN=keepass,OU=groups,DC=example,DC=org))'
+
+    # (unique) ldap attribute for user login
+    # Active Directory: sAMAccountName or userPrincipalName
+    # openLDAP/389 Directory Server/etc: uid
+    login_attribute: 'uid'
+
+    # ldap bind DN and password, leave empty for anonymous bind
+    bind:     'CN=ldap-read,OU=Special Users,DC=example,DC=org'
+    password: ''
+
+    # ldap attribute containing the keepass database and/or keyfile location for the authed user
+    # leave commented out to use static db/keyfile location from db backend
+    # database_attribute: 'keePass'
+    # keyfile_attribute:  'keePassKeyFile'
+
+# open id connect specific configuration, auth_backend = 'OIDC'
+OIDC:
+    # url to the issuer (discovery url)
+    # issuer: ''
+    client_id: ''
+    client_secret: ''
+    # required for logout without confirmation
+    # the token is pretty big and might not fit into a session cookie
+    # disable if issues arise
+    save_id_token: true
+    scopes:
+      - 'profile'
+      # scope containing the keepass_location and/or keyfile_location claims for the authed user
+      # leave commented out to use static db/keyfile location from db backend
+      # - 'keepass'
+
+# htpasswd specific configuration, auth_backend = 'htpasswd'
+htpasswd:
+    path: '.htpasswd'
+
+# time till database gets closed (user idle time)
+# user will have to reenter database password/keyfile
+db_session_timeout: '10 minutes'
+# interval to watch for user auth_backend changes (to present proper login page, even when user is idling)
+auth_check_interval: '1 hour 5 minutes'
+
+search:
+  # fields to search for matching entries
+  fields:
+    - title
+    - username
+    - tags
+    - notes
+    - url
+  # whether to search in user supplied fields and file names
+  extra_fields: true
+  # whether regexes in the search pattern are interpreted
+  allow_regex: false
+
+
+# Secret key used for session cookies
+# Must be at least 64 bytes long, obtained from a cryptographically secure source.
+# Will be generated on the fly if not specified.
+# Set a static key for sessions to survive server restarts.
+# session_secret_key: ''
+# Cookie session lifetime
+session_lifetime: '1 hour'
+# Cookie same site setting: strict/lax/none
+# Redirecting backends might require lax here
+cookie_samesite: 'strict'
+
+# The dedicated Go-to-Rust endpoint uses port 8080. The legacy Rust UI listener
+# has no host port and remains on the private Docker network at port 8081.
+listen:  '0.0.0.0'
+port:    8081
+
+private_service:
+  enabled: true
+  # Container binding is explicitly allowed only by Compose through
+  # PRIVATE_SERVICE_ALLOW_CONTAINER_BIND=true. The credential itself must come
+  # from RUST_SERVICE_TOKEN and is never committed here.
+  listen: '127.0.0.1'
+  port: 8080

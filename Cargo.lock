@@ -1955,6 +1955,7 @@ dependencies = [
  "regex",
  "reqwest",
  "secrecy",
+ "secstr",
  "serde",
  "serde_json",
  "serde_millis",

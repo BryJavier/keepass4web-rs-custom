@@ -1,0 +1,17 @@
+{{define "head"}}<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KeePass4Web</title>
+<link rel="stylesheet" href="/static/tailwind.css">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>{{end}}
+
+{{define "brand-mark"}}<span class="w-7 h-7 border border-[#1d1f20] flex items-center justify-center shrink-0">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5 text-[#5980a6]"><rect x="4" y="11" width="16" height="9" rx="1"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+</span>{{end}}
+
+{{define "corner-marks"}}<i class="absolute -top-2 -left-2 text-[10px] leading-none font-mono text-[#5980a6] select-none pointer-events-none">+</i>
+<i class="absolute -top-2 -right-2 text-[10px] leading-none font-mono text-[#5980a6] select-none pointer-events-none">+</i>
+<i class="absolute -bottom-2 -left-2 text-[10px] leading-none font-mono text-[#5980a6] select-none pointer-events-none">+</i>
+<i class="absolute -bottom-2 -right-2 text-[10px] leading-none font-mono text-[#5980a6] select-none pointer-events-none">+</i>{{end}}

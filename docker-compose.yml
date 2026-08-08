@@ -1,19 +1,44 @@
+# `docker compose up --build` works standalone for local development: every
+# variable below has a functional default, so no --env-file is required.
+# Staging/production still layer deploy/compose/{staging,production}.yml with
+# --env-file to replace these with real managed-secret values; see
+# docs/operations/configuration.md.
+#
+# Prerequisite for local auth/storage: run `supabase start` first (uses the
+# project at ./supabase). The SUPABASE_ANON_KEY default below is this
+# project's local demo anon key -- run `supabase status` and compare the
+# ANON_KEY field if you ever reset/reinit the local project and this drifts.
+# It is not a secret, only valid against a local Supabase instance.
 services:
   web:
     build:
       context: .
-      dockerfile: cmd/web/Dockerfile
+      dockerfile: backend-go/cmd/web/Dockerfile
+    restart: unless-stopped
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_LISTEN_ADDR: ${APP_LISTEN_ADDR:-:8080}
-      APP_SESSION_SECRET: ${APP_SESSION_SECRET:-replace-at-runtime-not-a-secret}
-      SUPABASE_URL: ${SUPABASE_URL:-https://example.supabase.co}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-public-anon-key-placeholder-not-a-secret}
-      SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-https://example.supabase.co/auth/v1}
+      APP_SESSION_SECRET: ${APP_SESSION_SECRET:-local-development-session-secret-not-for-production}
+      # Keep the browser/host URL (SUPABASE_URL, used in the sign-in page's
+      # client-side fetch) separate from the address the Go container itself
+      # resolves (SUPABASE_CONTAINER_URL). Docker Desktop exposes the host's
+      # local Supabase at host.docker.internal; Linux needs the extra_hosts
+      # entry below for the same name to resolve.
+      SUPABASE_URL: ${SUPABASE_URL:-http://localhost:54321}
+      SUPABASE_CONTAINER_URL: ${SUPABASE_CONTAINER_URL:-http://host.docker.internal:54321}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0}
+      SUPABASE_JWT_ISSUER: ${SUPABASE_JWT_ISSUER:-http://host.docker.internal:54321/auth/v1}
       RUST_SERVICE_URL: ${RUST_SERVICE_URL:-http://rust-service:8080}
-      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-replace-at-runtime-not-a-secret}
+      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-local-development-shared-token}
     ports:
       - "${WEB_HOST_PORT:-8080}:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks:
       - public
       - private
@@ -22,11 +47,23 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     environment:
-      RUST_LISTEN_ADDR: ${RUST_LISTEN_ADDR:-:8080}
-      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-replace-at-runtime-not-a-secret}
+      # The legacy Rust UI listener remains private too; the dedicated Go
+      # boundary below is the only route the web service uses.
+      RUST_PRIVATE_LISTEN: ${RUST_PRIVATE_LISTEN:-0.0.0.0:8080}
+      RUST_SERVICE_TOKEN: ${RUST_SERVICE_TOKEN:-local-development-shared-token}
+      PRIVATE_SERVICE_ALLOW_CONTAINER_BIND: ${PRIVATE_SERVICE_ALLOW_CONTAINER_BIND:-true}
+    volumes:
+      - ./backend-rust/config.yml:/conf/config.yml:ro
+      - ./tests/test.kdbx:/db.kdbx:ro
     expose:
       - "8080"
+    healthcheck:
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     networks:
       - private
 

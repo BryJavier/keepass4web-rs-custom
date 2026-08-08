@@ -6,7 +6,7 @@ are not the primary redaction control.
 
 ## Allowed output schema
 
-`internal/observability.SafeFields` is the sole allow-list boundary for
+`backend-go/internal/observability.SafeFields` is the sole allow-list boundary for
 structured Go fields. Any key not listed below is dropped before it reaches a
 log, trace, error, or future session encoder.
 
@@ -56,7 +56,7 @@ replaced with `unknown` at the public-error boundary.
 Run the process-level sentinel audit from the repository root:
 
 ```sh
-go test ./tests/operations -run TestGoOutputContract -count=1
+go test ./backend-go/tests/operations -run TestGoOutputContract -count=1
 ```
 
 The audit builds the Go web process, injects unique sentinels through runtime

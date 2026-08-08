@@ -21,7 +21,8 @@ enabled = true
 site_url = "http://127.0.0.1:3000"
 additional_redirect_urls = []
 jwt_expiry = 3600
-enable_signup = true
+# v1 is provisioned for one account; new accounts are created administratively.
+enable_signup = false
 
 [storage]
 enabled = true

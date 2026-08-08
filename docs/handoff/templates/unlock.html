@@ -1,0 +1,49 @@
+{{define "unlock"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
+<div class="min-h-screen bg-[#f2f2f3] text-[#1d1f20]">
+  <header class="sticky top-0 z-20 bg-white border-b border-neutral-300">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2">
+        {{template "brand-mark" .}}
+        <span class="font-heading text-sm font-semibold uppercase tracking-wide hidden sm:inline">KeePass4Web</span>
+      </div>
+      <a href="/vaults" class="text-xs font-heading uppercase tracking-wide text-neutral-500 hover:text-[#3c5771]">Cancel</a>
+    </div>
+  </header>
+  <main class="flex items-center justify-center px-4 py-10 sm:py-16">
+    <div class="w-full max-w-sm">
+      <div class="relative border border-neutral-300 bg-white p-6 sm:p-8">
+        {{template "corner-marks" .}}
+        <div class="flex items-center gap-2 mb-1">
+          <img src="/static/icons/48.png" alt="" class="w-5 h-5" style="image-rendering:pixelated">
+          <span class="text-xs uppercase tracking-wide text-neutral-500">{{if .Selected.Name}}{{.Selected.Name}}{{else}}Vault{{end}}</span>
+        </div>
+        <h1 class="font-heading text-2xl font-semibold uppercase tracking-wide">Unlock vault</h1>
+        <p class="mt-1 text-sm text-neutral-500">Decrypted only in server memory. Nothing touches disk unless you save changes.</p>
+        <div id="unlock-error" {{if not .Error}}hidden{{end}} class="mt-4 border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2">{{if .Error}}{{.Error}}{{else}}The password or key file is incorrect, or the vault could not be decoded.{{end}}</div>
+        <form method="post" action="/vaults/unlock" enctype="multipart/form-data" class="mt-6 space-y-4">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <div>
+            <label for="unlock-password" class="block text-sm font-medium">Password</label>
+            <div class="mt-1 relative flex items-center">
+              <input id="unlock-password" type="password" name="password" autocomplete="current-password" autofocus class="w-full border border-neutral-300 px-3 py-2.5 pr-10 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-[#5980a6] focus-visible:ring-offset-1">
+              <button type="button" data-action="toggle-reveal" class="absolute right-2 text-neutral-400 hover:text-[#5980a6]" aria-label="Show password">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium">Key file <span class="text-neutral-400 font-normal">(optional)</span></label>
+            <label class="mt-1 flex items-center gap-2 border border-neutral-300 px-3 py-2.5 text-sm text-neutral-500 cursor-pointer hover:border-[#5980a6]">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 shrink-0"><path d="M7 17a4 4 0 0 1-1-7.87A5.5 5.5 0 0 1 16.9 8H17a3.5 3.5 0 0 1 0 7"></path><path d="M12 12v6"></path><path d="M9 15l3-3 3 3"></path></svg>
+              <span class="truncate js-file-label" data-placeholder="Choose key file">Choose key file</span>
+              <input type="file" name="key_file" class="hidden js-file-input">
+            </label>
+          </div>
+          <button type="submit" class="w-full bg-[#5980a6] hover:bg-[#4a6c8c] text-white font-heading uppercase tracking-wide text-sm py-2.5">Unlock</button>
+        </form>
+      </div>
+      <p class="mt-6 text-center text-xs text-neutral-400">Idle sessions revoke their decryption key automatically.</p>
+    </div>
+  </main>
+</div>
+</body></html>{{end}}

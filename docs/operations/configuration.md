@@ -41,3 +41,9 @@ Production secrets are injected from a managed secret store. Ignored files are
 only a local and development convenience; they are not a production secret
 system. Provider selection is deferred: the eventual platform must prove the
 managed-secret, TLS, and private-network controls below before deployment.
+
+`RUST_SERVICE_TOKEN` must have the identical value in the Go and Rust runtime
+configuration. Compose sets `RUST_PRIVATE_LISTEN=0.0.0.0:8080` and
+`PRIVATE_SERVICE_ALLOW_CONTAINER_BIND=true` only because the Rust container is
+attached solely to the internal `private` network; do not use either setting on
+a publicly routed host.

@@ -53,7 +53,7 @@ Only refresh a checksum when intentionally upgrading the matching version in
 1. Download the matching Linux AMD64 artifact from the official release page.
 2. Calculate its SHA-256 locally with `shasum -a 256 <artifact>`.
 3. Replace the corresponding value in `tools/checksums.env`.
-4. Run `node --test tests/operations/ci_toolchain.test.js` and the containerized
+4. Run `node --test backend-go/tests/operations/ci_toolchain.test.js` and the containerized
    version gate before opening a review.
 
 GitHub Actions downloads the exact Supabase archive and Docker Compose plugin,

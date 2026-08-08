@@ -3,7 +3,6 @@
 
 # npm
 node_modules/
-public/scripts/bundle.js
 npm-debug.log
 
 # playwright
@@ -13,9 +12,6 @@ playwright-report/
 
 # vim
 *.sw[a-z]
-
-# bootstrap
-public/fonts/*
 
 # data
 *.kdbx

@@ -10,7 +10,7 @@ services:
   rust-service:
     restart: unless-stopped
     volumes:
-      - ../../config.yml:/conf/config.yml:ro
+      - ../../backend-rust/config.yml:/conf/config.yml:ro
       - ../../tests/test.kdbx:/db.kdbx:ro
     healthcheck:
       interval: 10s

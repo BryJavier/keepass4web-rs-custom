@@ -53,7 +53,9 @@ Written in Rust and JavaScript.
 
 ## BUILD FRONTEND
 
-The minified, bundled file will be written to public/scripts/bundle.js
+The frontend is server-rendered Go `html/template` (`frontend/templates/`) styled
+with Tailwind CSS. The minified stylesheet is written to
+`frontend/web/static/tailwind.css`.
 
 - Install Node/npm, e.g. for Ubuntu
   > sudo apt-get install npm
@@ -61,18 +63,12 @@ The minified, bundled file will be written to public/scripts/bundle.js
 - Install js modules
   > npm install
 
-- Copy bootstrap font files
-  > cp node_modules/bootstrap/fonts/* public/fonts/
-
-- Build js bundle
-  > npm run build
-
-- For a non-uglified version you can run
-  > npm run dev
+- Build the stylesheet
+  > npm run build:css
 
 ## CONFIGURATION
 
-- See `config.yml`
+- See `backend-rust/config.yml`
 
 ## DEPLOYMENT
 
@@ -100,7 +96,7 @@ The required syscalls are:
 - add_key
 - request_key
 
-There's an example seccomp profile [seccomp/keyring.json](seccomp/keyring.json) in the repo.
+There's an example seccomp profile [backend-rust/seccomp/keyring.json](backend-rust/seccomp/keyring.json) in the repo.
 
 **Make sure no other containers are running under the same user, or they will be able to access keys stored for
 keepass4web**.
@@ -113,18 +109,18 @@ This is best achieved by running rootless containers with a dedicated user for k
 Example docker:
 
     docker run \
-      -p 8080:8080 -v ./config.yml:/conf/config.yml \
+      -p 8080:8080 -v ./backend-rust/config.yml:/conf/config.yml \
       -v ./tests/test.kdbx:/db.kdbx \
-      --security-opt seccomp=seccomp/keyring.json \
+      --security-opt seccomp=backend-rust/seccomp/keyring.json \
       ghcr.io/lixmal/keepass4web-rs:master
 
 Example podman:
 
     podman run \
       --userns=keep-id \
-      -p 8080:8080 -v ./config.yml:/conf/config.yml \
+      -p 8080:8080 -v ./backend-rust/config.yml:/conf/config.yml \
       -v ./tests/test.kdbx:/db.kdbx \
-      --security-opt seccomp=seccomp/keyring.json \
+      --security-opt seccomp=backend-rust/seccomp/keyring.json \
       ghcr.io/lixmal/keepass4web-rs:master
 
 (master password: `test`)
@@ -253,7 +249,7 @@ sequenceDiagram
 This software is copyright (c) by Viktor Liu.
 It is released under the terms of the GPL version 3.
 
-Most of the icons in the `public/img/icons` directory are released under the LGPL version 2, the licence can be found in
+Most of the icons in the `frontend/web/static/icons` directory are released under the LGPL version 2, the licence can be found in
 the same directory.
 The remaining icons are public domain.
 As these icons are the same as the ones used by the original KeePass software, you can refer to the info

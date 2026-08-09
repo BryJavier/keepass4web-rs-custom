@@ -56,10 +56,10 @@ Only the KeePass4Web Go service is public. The Rust service has no public route.
 
 ```text
 BryJavier/keepass4web-rs-custom   Application source, SQL migrations, tests, image builds
-BryJavier/platform-deployments    Kubernetes manifests and immutable image references
+BryJavier/keepass4web-deployments Kubernetes manifests and immutable image references (renamed from platform-deployments)
 BryJavier/platform-bootstrap      Argo CD root/apps and generic platform components
 BryJavier/platform-secrets        SOPS-encrypted secrets only
-BryJavier/platform-supabase       Pinned Supabase Compose definition and host deployment automation
+BryJavier/keepass4web-supabase    Pinned Supabase Compose definition and host deployment automation (renamed from platform-supabase)
 ```
 
 The source repository builds artifacts but does not receive Kubernetes credentials. `platform-deployments` is the change-controlled source of application desired state. `platform-bootstrap` lets the cluster grow to host future applications. `platform-secrets` must contain encrypted values only; raw secrets are never committed.

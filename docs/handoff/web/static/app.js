@@ -4,17 +4,8 @@
     else document.addEventListener('DOMContentLoaded', fn);
   }
 
-  function getCsrfToken() {
-    var el = document.querySelector('[data-csrf-token]');
-    return el ? el.dataset.csrfToken : '';
-  }
-
-  function themeRoot() {
-    return document.querySelector('.theme-scope');
-  }
-
   function applyInitialTheme() {
-    var root = themeRoot();
+    var root = document.getElementById('theme-root');
     if (!root) return;
     var server = root.dataset.initialTheme;
     var mode = (server === 'dark' || server === 'light') ? server : null;
@@ -29,9 +20,9 @@
   // Persists the theme choice: instantly to localStorage (so the next page
   // load in this browser is correct even before the server responds) and to
   // the signed-in user's row via POST /preferences/theme (so it follows them
-  // to another device/browser).
+  // to another device/browser). See IMPLEMENTATION_GUIDE.md.
   function setTheme(mode) {
-    var root = themeRoot();
+    var root = document.getElementById('theme-root');
     if (root) root.classList.toggle('dark', mode === 'dark');
     try { localStorage.setItem('kp4w-theme', mode); } catch (e) {}
     fetch('/preferences/theme', {
@@ -40,6 +31,11 @@
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'csrf_token=' + encodeURIComponent(getCsrfToken()) + '&theme=' + encodeURIComponent(mode),
     }).catch(function () {});
+  }
+
+  function getCsrfToken() {
+    var el = document.querySelector('[data-csrf-token]');
+    return el ? el.dataset.csrfToken : '';
   }
 
   function filterEntries(q) {
@@ -54,6 +50,8 @@
     if (empty) empty.hidden = visible !== 0;
   }
 
+  // Clears the clipboard 10s after a copy, unless something else has since
+  // overwritten it (per docs/api/vault-management.md's frontend-only clause).
   var clipboardClearTimer = null;
   function copyWithAutoClear(value) {
     navigator.clipboard.writeText(value);
@@ -65,19 +63,19 @@
     }, 10000);
   }
 
+  // Polls GET /session/status every 5s while an idle banner exists on the
+  // page, showing it once idle_seconds_remaining drops to the threshold, and
+  // posts to /session/heartbeat (throttled) on real user interaction.
   function startIdlePolling() {
     var banner = document.getElementById('idle-banner');
     if (!banner) return;
     var threshold = 15;
+
     async function poll() {
       try {
         var res = await fetch('/session/status', { credentials: 'same-origin' });
         if (!res.ok) return;
         var data = await res.json();
-        if (!data.active) {
-          window.location.assign('/sign-in');
-          return;
-        }
         if (data.active && data.vault_active && data.idle_seconds_remaining <= threshold) {
           banner.hidden = false;
           var el = document.getElementById('idle-seconds');
@@ -85,17 +83,21 @@
         } else {
           banner.hidden = true;
         }
-      } catch (err) {}
+      } catch (err) {
+        /* offline or backend unavailable — leave banner state as-is */
+      }
     }
     poll();
     setInterval(poll, 5000);
+
     var lastBeat = 0;
     function heartbeat() {
       var now = Date.now();
       if (now - lastBeat < 4000) return;
       lastBeat = now;
       fetch('/session/heartbeat', {
-        method: 'POST', credentials: 'same-origin',
+        method: 'POST',
+        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'csrf_token=' + encodeURIComponent(getCsrfToken()),
       }).catch(function () {});
@@ -108,6 +110,7 @@
   onReady(function () {
     applyInitialTheme();
     startIdlePolling();
+
     var search = document.getElementById('entry-search');
     if (search) search.addEventListener('input', function () { filterEntries(search.value); });
 
@@ -138,34 +141,12 @@
     }
   });
 
-  document.addEventListener('htmx:afterSwap', function () {
-    applyInitialTheme();
-  });
-
   document.addEventListener('click', function (e) {
     var themeToggle = e.target.closest('[data-action="toggle-theme"]');
     if (themeToggle) {
-      var root = themeRoot();
+      var root = document.getElementById('theme-root');
       setTheme(root && root.classList.contains('dark') ? 'light' : 'dark');
       return;
-    }
-    var menuToggle = e.target.closest('[data-action="toggle-menu"]');
-    if (menuToggle) {
-      e.preventDefault();
-      e.stopPropagation();
-      var targetMenu = document.getElementById(menuToggle.dataset.menuTarget);
-      document.querySelectorAll('[data-menu]').forEach(function (menu) {
-        if (menu !== targetMenu) menu.hidden = true;
-      });
-      if (targetMenu) {
-        targetMenu.hidden = !targetMenu.hidden;
-        menuToggle.setAttribute('aria-expanded', String(!targetMenu.hidden));
-      }
-      return;
-    }
-    if (!e.target.closest('[data-menu]')) {
-      document.querySelectorAll('[data-menu]').forEach(function (menu) { menu.hidden = true; });
-      document.querySelectorAll('[data-action="toggle-menu"]').forEach(function (toggle) { toggle.setAttribute('aria-expanded', 'false'); });
     }
     var reveal = e.target.closest('[data-action="toggle-reveal"]');
     if (reveal) {
@@ -198,10 +179,6 @@
     }
     var openModal = e.target.closest('[data-action="show-modal"]');
     if (openModal) {
-      e.preventDefault();
-      e.stopPropagation();
-      document.querySelectorAll('[data-menu]').forEach(function (menu) { menu.hidden = true; });
-      document.querySelectorAll('[data-action="toggle-menu"]').forEach(function (toggle) { toggle.setAttribute('aria-expanded', 'false'); });
       var dlg = document.getElementById(openModal.dataset.target);
       if (dlg && dlg.showModal) dlg.showModal();
       return;

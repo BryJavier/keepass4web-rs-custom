@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
+  darkMode: 'class',
   content: ['./backend-go/cmd/web/**/*.go', './backend-go/internal/web/**/*.go', './frontend/templates/**/*.html'],
   theme: {
     extend: {

@@ -89,6 +89,14 @@ type TokenValidator interface {
 	Validate(context.Context, string) (supabase.Identity, error)
 }
 
+// ThemeStore is the small seam for the per-user dark-mode preference. Kept
+// separate from SessionVaultRepository so environments without it configured
+// simply render with an empty Theme (client falls back to prefers-color-scheme).
+type ThemeStore interface {
+	ThemePreference(ctx context.Context, accessToken, userID string) (string, error)
+	SetThemePreference(ctx context.Context, accessToken, userID, theme string) error
+}
+
 // TrashPurger is the only server-only capability the HTTP app receives. Its
 // implementation retains any service-role credential outside this package.
 type TrashPurger interface {
@@ -99,6 +107,7 @@ type Dependencies struct {
 	SessionVaults   SessionVaultRepository
 	Rust            RustVaultService
 	Auth            TokenValidator
+	Preferences     ThemeStore
 	SecureCookies   bool
 	SupabaseURL     string
 	SupabaseAnonKey string
@@ -120,14 +129,15 @@ type Dependencies struct {
 	PurgeContext context.Context
 }
 type session struct {
-	userID, accessToken, csrfToken, activeHandle, activeVaultID, email string
-	lastActivity                                                       time.Time
+	userID, accessToken, csrfToken, activeHandle, activeVaultID, email, theme string
+	lastActivity                                                              time.Time
 }
 type App struct {
 	vaults          VaultRepository
 	sessionVaults   SessionVaultRepository
 	rust            RustVaultService
 	auth            TokenValidator
+	preferences     ThemeStore
 	secureCookies   bool
 	supabaseURL     string
 	supabaseAnonKey string
@@ -153,6 +163,7 @@ func NewApp(d Dependencies) *App {
 		sessionVaults:   d.SessionVaults,
 		rust:            d.Rust,
 		auth:            d.Auth,
+		preferences:     d.Preferences,
 		secureCookies:   d.SecureCookies,
 		supabaseURL:     d.SupabaseURL,
 		supabaseAnonKey: d.SupabaseAnonKey,
@@ -315,6 +326,8 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.sessionStatus(w, r)
 	case r.Method == "POST" && r.URL.Path == "/session/heartbeat":
 		a.heartbeat(w, r)
+	case r.Method == "POST" && r.URL.Path == "/preferences/theme":
+		a.setThemePreference(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -344,9 +357,14 @@ func (a *App) createBrowserSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie := a.createSession(identity.ID, token)
+	var theme string
+	if a.preferences != nil {
+		theme, _ = a.preferences.ThemePreference(r.Context(), token, identity.ID)
+	}
 	a.mu.Lock()
 	s := a.sessions[cookie.Value]
 	s.email = identity.Email
+	s.theme = theme
 	a.sessions[cookie.Value] = s
 	a.mu.Unlock()
 	http.SetCookie(w, cookie)
@@ -403,6 +421,35 @@ func (a *App) heartbeat(w http.ResponseWriter, r *http.Request) {
 	// a.authenticated already refreshed lastActivity above.
 	w.WriteHeader(http.StatusNoContent)
 }
+func (a *App) setThemePreference(w http.ResponseWriter, r *http.Request) {
+	id, s, ok := a.authenticated(r)
+	if !ok {
+		http.Redirect(w, r, "/sign-in", 303)
+		return
+	}
+	if !a.validCSRF(r, s) {
+		http.Error(w, "Your form has expired. Please reload and try again.", 403)
+		return
+	}
+	theme := r.Form.Get("theme")
+	if theme != "light" && theme != "dark" {
+		http.Error(w, "Invalid theme.", 400)
+		return
+	}
+	if a.preferences == nil {
+		http.Error(w, "Theme preference is unavailable.", 503)
+		return
+	}
+	if err := a.preferences.SetThemePreference(r.Context(), s.accessToken, s.userID, theme); err != nil {
+		http.Error(w, "Unable to save theme preference. Please try again.", 500)
+		return
+	}
+	s.theme = theme
+	a.mu.Lock()
+	a.sessions[id] = s
+	a.mu.Unlock()
+	w.WriteHeader(http.StatusNoContent)
+}
 func (a *App) vaultsPage(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
 	if !ok {
@@ -414,7 +461,7 @@ func (a *App) vaultsPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Unable to load vaults. Please try again.", 500)
 		return
 	}
-	a.render(w, "vaults", vaultPage{Vaults: vaults, CSRFToken: s.csrfToken, Fragment: isHTMX(r), Email: s.email})
+	a.render(w, "vaults", vaultPage{Vaults: vaults, CSRFToken: s.csrfToken, Fragment: isHTMX(r), Email: s.email, Theme: s.theme})
 }
 func (a *App) uploadVault(w http.ResponseWriter, r *http.Request) {
 	_, s, ok := a.authenticated(r)
@@ -657,7 +704,7 @@ func (a *App) trashedVaults(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsHTML(r) {
 		a.render(w, "vault-trash", vaultTrashPage{
-			vaultPage:     vaultPage{CSRFToken: s.csrfToken, Email: s.email},
+			vaultPage:     vaultPage{CSRFToken: s.csrfToken, Email: s.email, Theme: s.theme},
 			TrashedVaults: vaults,
 		})
 		return
@@ -776,7 +823,7 @@ func (a *App) unlockPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/vaults", http.StatusSeeOther)
 		return
 	}
-	a.render(w, "unlock", vaultPage{CSRFToken: s.csrfToken, Selected: v})
+	a.render(w, "unlock", vaultPage{CSRFToken: s.csrfToken, Selected: v, Theme: s.theme})
 }
 func (a *App) unlock(w http.ResponseWriter, r *http.Request) {
 	id, s, ok := a.authenticated(r)
@@ -821,7 +868,7 @@ func (a *App) unlock(w http.ResponseWriter, r *http.Request) {
 	res, err := a.rust.Unlock(r.Context(), privateclient.UnlockRequest{UserID: s.userID, VaultID: v.ID, DatabaseB64: base64.StdEncoding.EncodeToString(data), Password: &password, KeyfileB64: keyfile})
 	if err != nil {
 		// This is a decoder failure, not a Supabase authentication failure.
-		a.renderStatus(w, http.StatusUnprocessableEntity, "unlock", vaultPage{CSRFToken: s.csrfToken, Selected: v, Error: "The vault password or key file is incorrect, or the vault could not be decoded."})
+		a.renderStatus(w, http.StatusUnprocessableEntity, "unlock", vaultPage{CSRFToken: s.csrfToken, Selected: v, Error: "The vault password or key file is incorrect, or the vault could not be decoded.", Theme: s.theme})
 		return
 	}
 	if err := a.syncDecodedEntries(r.Context(), s, res.Handle); err != nil {
@@ -869,7 +916,7 @@ func (a *App) browseWithErrorStatus(w http.ResponseWriter, r *http.Request, stat
 	a.renderStatus(w, status, "browse", struct {
 		vaultPage
 		Entries []DecodedEntry
-	}{vaultPage: vaultPage{CSRFToken: s.csrfToken, Selected: v, Email: s.email, Error: pageError}, Entries: entries})
+	}{vaultPage: vaultPage{CSRFToken: s.csrfToken, Selected: v, Email: s.email, Error: pageError, Theme: s.theme}, Entries: entries})
 }
 func (a *App) syncDecodedEntries(ctx context.Context, s session, handle string) error {
 	request := privateclient.HandleRequest{Handle: handle, UserID: s.userID, VaultID: s.activeVaultID}
@@ -1182,7 +1229,7 @@ func (a *App) trashedEntries(w http.ResponseWriter, r *http.Request) {
 	}
 	if wantsHTML(r) {
 		a.render(w, "entry-trash", entryTrashPage{
-			vaultPage: vaultPage{CSRFToken: s.csrfToken, Selected: selected, Email: s.email},
+			vaultPage: vaultPage{CSRFToken: s.csrfToken, Selected: selected, Email: s.email, Theme: s.theme},
 			Entries:   entries,
 		})
 		return
@@ -1550,6 +1597,7 @@ type vaultPage struct {
 	SupabaseURL     string
 	SupabaseAnonKey string
 	Error           string
+	Theme           string
 }
 
 type vaultTrashPage struct {
@@ -1582,6 +1630,13 @@ func templateDict(values ...any) map[string]any {
 
 // SupabaseVaults adapts the REST/storage client without leaking its types into handlers.
 type SupabaseVaults struct{ Client *supabase.VaultClient }
+
+func (s SupabaseVaults) ThemePreference(c context.Context, token, userID string) (string, error) {
+	return s.Client.ThemePreference(c, token, userID)
+}
+func (s SupabaseVaults) SetThemePreference(c context.Context, token, userID, theme string) error {
+	return s.Client.SetThemePreference(c, token, userID, theme)
+}
 
 func (s SupabaseVaults) ListForSession(c context.Context, u, t string) ([]Vault, error) {
 	vs, e := s.Client.List(c, t, u)

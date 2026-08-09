@@ -14,7 +14,7 @@
 </header>{{end}}
 
 {{define "vault-trash"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
-<div id="theme-root" class="theme-scope min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-initial-theme="{{.Theme}}">
+<div id="theme-root" class="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-initial-theme="{{.Theme}}">
   {{template "trash-header" (dict "BackHref" "/vaults" "Heading" "Vault trash" "Email" .Email "CSRFToken" .CSRFToken)}}
   <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8">
     <div class="flex items-end justify-between gap-3"><div><p class="text-xs uppercase tracking-wide text-[var(--text-secondary)]">Recovery</p><h1 class="mt-1 font-heading text-xl font-semibold uppercase tracking-wide">Vault trash</h1><p class="mt-1 text-sm text-[var(--text-secondary)]">Deleted vaults are kept for 30 days before permanent removal.</p></div><span class="text-xs text-[var(--text-secondary)]">{{len .TrashedVaults}} items</span></div>
@@ -36,7 +36,7 @@
 </div></body></html>{{end}}
 
 {{define "entry-trash"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
-<div id="theme-root" class="theme-scope min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-initial-theme="{{.Theme}}">
+<div id="theme-root" class="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-initial-theme="{{.Theme}}">
   {{template "trash-header" (dict "BackHref" "/vaults/browse" "Heading" .Selected.Name "Email" .Email "CSRFToken" .CSRFToken)}}
   <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8">
     <div class="flex items-end justify-between gap-3"><div><p class="text-xs uppercase tracking-wide text-[var(--text-secondary)]">{{.Selected.Name}}</p><h1 class="mt-1 font-heading text-xl font-semibold uppercase tracking-wide">Entry trash</h1><p class="mt-1 text-sm text-[var(--text-secondary)]">Restore entries to their original group while they are recoverable.</p></div><a href="/vaults/browse" class="text-xs font-heading uppercase tracking-wide text-[#3c5771] hover:text-[#5980a6] dark:text-accent-300 dark:hover:text-accent-100">Back to entries</a></div>

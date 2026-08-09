@@ -1,5 +1,5 @@
 {{define "sign-in"}}<!doctype html><html>{{template "head" .}}<body class="font-body" data-supabase-url="{{.SupabaseURL}}" data-supabase-anon-key="{{.SupabaseAnonKey}}">
-<div id="theme-root" class="theme-scope min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)] flex flex-col" data-initial-theme="{{.Theme}}">
+<div id="theme-root" class="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)] flex flex-col" data-initial-theme="{{.Theme}}">
   <header class="px-4 sm:px-6 py-5 flex items-center justify-between gap-2">
     <div class="flex items-center gap-2">
       {{template "brand-mark" .}}

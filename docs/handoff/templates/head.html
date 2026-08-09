@@ -2,17 +2,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KeePass4Web</title>
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <link rel="stylesheet" href="/static/tailwind.css">
 <style>
 :root{--bg-page:#f2f2f3;--bg-surface:#ffffff;--bg-surface-hover:#fafafa;--text-primary:#1d1f20;--text-secondary:#737373;--text-muted:#a3a3a3;--text-label:#525252;--border-default:#d4d4d4;--border-dashed:#a3a3a3;--divider:#e5e5e5}
-.theme-scope.dark{--bg-page:#17191b;--bg-surface:#202325;--bg-surface-hover:#2a2e31;--text-primary:#f3f4f5;--text-secondary:#a1a7ad;--text-muted:#7d848a;--text-label:#c4c9ce;--border-default:#34383b;--border-dashed:#4b5054;--divider:#2b2f32}
+#theme-root.dark{--bg-page:#17191b;--bg-surface:#202325;--bg-surface-hover:#2a2e31;--text-primary:#f3f4f5;--text-secondary:#a1a7ad;--text-muted:#7d848a;--text-label:#c4c9ce;--border-default:#34383b;--border-dashed:#4b5054;--divider:#2b2f32}
 input,textarea,select{background-color:var(--bg-surface);color:var(--text-primary)}
 ::placeholder{color:var(--text-muted);opacity:1}
 dialog{background-color:var(--bg-surface);color:var(--text-primary)}
 </style>
 <script src="/static/htmx.min.js" defer></script>
-<script src="/static/app.js?v=4" defer></script>
+<script src="/static/app.js" defer></script>
 </head>{{end}}
 
 {{define "brand-mark"}}<span class="w-7 h-7 border border-[var(--text-primary)] flex items-center justify-center shrink-0">

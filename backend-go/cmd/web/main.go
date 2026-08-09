@@ -106,6 +106,7 @@ func runWithLogger(getenv func(string) string, logger *slog.Logger, serve func(C
 	if err != nil { return err }
 	return serve(configuration, newHandlerWithDependencies(logger, web.Dependencies{
 		Auth:               auth,
+		Preferences:        web.SupabaseVaults{Client: vaults},
 		SessionVaults:      web.SupabaseVaults{Client: vaults},
 		Rust:               rust,
 		SecureCookies:      configuration.Environment != "test" && configuration.Environment != "development",

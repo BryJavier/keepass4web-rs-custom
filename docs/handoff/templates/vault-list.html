@@ -1,0 +1,100 @@
+{{define "vault-list"}}<div id="vault-list theme-root" data-csrf-token="{{.CSRFToken}}">
+  <header class="sticky top-0 z-20 bg-[var(--bg-surface)] border-b border-[var(--border-default)]">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2">
+        {{template "brand-mark" .}}
+        <span class="font-heading text-sm font-semibold uppercase tracking-wide hidden sm:inline">KeePass4Web</span>
+      </div>
+      <div class="flex items-center gap-3">
+        <span class="hidden sm:inline text-xs text-[var(--text-secondary)] truncate max-w-[10rem]">{{.Email}}</span>
+        {{template "theme-toggle" .}}
+        <form method="post" action="/sign-out">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <button type="submit" class="flex items-center gap-1.5 text-xs font-heading uppercase tracking-wide text-[var(--text-secondary)] hover:text-[#3c5771] dark:hover:text-accent-300 px-2 py-1.5">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="M16 17l5-5-5-5"></path><path d="M21 12H9"></path></svg>
+            <span class="hidden lg:inline">Sign out</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  <div id="idle-banner" hidden class="bg-accent-50 border-b border-accent-200 text-accent-900 text-sm dark:bg-accent-900/25 dark:border-accent-800 dark:text-accent-100">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6 py-2 flex items-center justify-between gap-3">
+      <p><span class="font-medium">Session idle.</span> Your access will be revoked in <span id="idle-seconds">60</span>s of inactivity.</p>
+      <button type="button" data-action="dismiss-idle" class="text-accent-700 hover:text-accent-900 dark:text-accent-300 dark:hover:text-accent-100" aria-label="Dismiss">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-3.5 h-3.5"><path d="M18 6L6 18"></path><path d="M6 6l12 12"></path></svg>
+      </button>
+    </div>
+  </div>
+
+  <main class="max-w-5xl mx-auto px-4 sm:px-6 py-8">
+    <h1 class="font-heading text-xl font-semibold uppercase tracking-wide">Your vaults</h1>
+    <div class="mt-1 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+      <p class="text-sm text-[var(--text-secondary)]">Select a vault to unlock it, or upload a new .kdbx file.</p>
+      <a href="/vaults/trash" class="shrink-0 border border-[var(--border-default)] text-[#3c5771] hover:bg-accent-50 dark:text-accent-300 dark:hover:bg-accent-900/30 font-heading uppercase tracking-wide text-xs px-3 py-2">Vault trash</a>
+    </div>
+
+    <div class="mt-6 relative border border-dashed border-[var(--border-dashed)] bg-[var(--bg-surface)] p-5">
+      {{template "corner-marks" .}}
+      <p class="font-heading text-sm font-semibold uppercase tracking-wide text-[var(--text-label)]">Upload a vault</p>
+      <form method="post" action="/vaults/upload" enctype="multipart/form-data" hx-post="/vaults/upload" hx-target="#vault-list" hx-swap="outerHTML" hx-encoding="multipart/form-data" class="mt-3 flex flex-col sm:flex-row gap-3">
+        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+        <input type="text" name="name" placeholder="Vault name (optional)" class="flex-1 border border-[var(--border-default)] px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-[#5980a6] focus:outline-none">
+        <label class="flex-1 flex items-center gap-2 border border-[var(--border-default)] px-3 py-2 text-sm text-[var(--text-secondary)] cursor-pointer hover:border-[#5980a6]">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 shrink-0"><path d="M7 17a4 4 0 0 1-1-7.87A5.5 5.5 0 0 1 16.9 8H17a3.5 3.5 0 0 1 0 7"></path><path d="M12 12v6"></path><path d="M9 15l3-3 3 3"></path></svg>
+          <span class="truncate js-file-label" data-placeholder="Choose .kdbx file">Choose .kdbx file</span>
+          <input type="file" name="vault" accept=".kdbx" required class="hidden js-file-input">
+        </label>
+        <button type="submit" class="bg-[#5980a6] hover:bg-[#4a6c8c] text-white font-heading uppercase tracking-wide text-xs px-5 py-2 [.htmx-request_&]:opacity-60">Upload</button>
+      </form>
+      <div class="mt-4 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+        <span class="h-px flex-1 bg-[var(--divider)]"></span><span>or</span><span class="h-px flex-1 bg-[var(--divider)]"></span>
+      </div>
+      <button type="button" data-action="show-modal" data-target="create-vault-dialog" class="mx-auto mt-3 block border border-[#5980a6] text-[#3c5771] hover:bg-accent-50 dark:text-accent-300 dark:hover:bg-accent-900/30 font-heading uppercase tracking-wide text-xs px-5 py-2">Create a new vault</button>
+      <dialog id="create-vault-dialog" class="relative border border-[var(--border-default)] p-6 max-w-sm w-[calc(100%-2rem)] [&::backdrop]:bg-[#1d1f20]/50">
+        {{template "corner-marks" .}}
+        <h3 class="font-heading text-base font-semibold uppercase tracking-wide">Create a new vault</h3>
+        <p class="mt-1 text-sm text-[var(--text-secondary)]">Starts empty. Upload or add entries once it's open.</p>
+        <div id="create-vault-error" hidden class="mt-3 border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2 dark:border-red-800/60 dark:bg-red-900/30 dark:text-red-300">Unable to create that vault. Check the name and password.</div>
+        <form method="post" action="/vaults/create" hx-post="/vaults/create" hx-target="#vault-list" hx-swap="outerHTML" hx-on--response-error="document.getElementById('create-vault-error').hidden=false" class="mt-4 space-y-3">
+          <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+          <div><label class="block text-xs font-medium text-[var(--text-label)] uppercase tracking-wide">Vault name</label><input type="text" name="name" required class="mt-1 w-full border border-[var(--border-default)] px-3 py-2 text-sm"></div>
+          <div><label class="block text-xs font-medium text-[var(--text-label)] uppercase tracking-wide">Master password</label><input type="password" name="password" required autocomplete="new-password" class="mt-1 w-full border border-[var(--border-default)] px-3 py-2 text-sm"></div>
+          <p class="text-xs text-[var(--text-muted)]">Choose carefully — this password is never stored and can't be recovered.</p>
+          <div class="flex justify-end gap-2 pt-1">
+            <button type="button" data-action="close-modal" class="border border-[var(--border-default)] px-4 py-2 text-xs font-heading uppercase tracking-wide hover:bg-[var(--bg-surface-hover)]">Cancel</button>
+            <button type="submit" class="bg-[#5980a6] hover:bg-[#4a6c8c] text-white px-4 py-2 text-xs font-heading uppercase tracking-wide [.htmx-request_&]:opacity-60">Create vault</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+
+    {{if .Vaults}}
+    <div class="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+      {{range .Vaults}}
+      <div class="relative border border-[var(--border-default)] bg-[var(--bg-surface)] p-5 flex flex-col gap-3">
+        {{template "corner-marks" $}}
+        <div class="flex items-center gap-3">
+          <img src="/static/icons/48.png" alt="" class="w-6 h-6" style="image-rendering:pixelated">
+          <div class="min-w-0"><p class="font-heading text-base font-semibold truncate">{{.Name}}</p><p class="text-xs text-[var(--text-secondary)]">.kdbx vault</p></div>
+        </div>
+        <form method="post" action="/vaults/select" hx-post="/vaults/select" hx-target="#vault-list" hx-swap="outerHTML" class="mt-1">
+          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+          <input type="hidden" name="vault_id" value="{{.ID}}">
+          <button type="submit" class="w-full border border-[#5980a6] text-[#3c5771] hover:bg-accent-50 dark:text-accent-300 dark:hover:bg-accent-900/30 font-heading uppercase tracking-wide text-xs py-2 [.htmx-request_&]:opacity-60">Open vault</button>
+        </form>
+      </div>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="mt-6 border border-dashed border-[var(--border-default)] bg-[var(--bg-surface)] py-14 text-center">
+      <img src="/static/icons/48.png" alt="" class="w-8 h-8 mx-auto opacity-60" style="image-rendering:pixelated">
+      <p class="mt-3 font-heading text-sm font-semibold uppercase tracking-wide text-[var(--text-secondary)]">No vaults yet</p>
+      <p class="mt-1 text-sm text-[var(--text-muted)]">Upload a .kdbx file above to get started.</p>
+    </div>
+    {{end}}
+  </main>
+</div>{{end}}
+
+{{define "vaults"}}{{if .Fragment}}{{template "vault-list" .}}{{else}}<!doctype html><html>{{template "head" .}}<body class="font-body">{{template "vault-list" .}}</body></html>{{end}}{{end}}

@@ -1,5 +1,5 @@
 {{define "browse"}}<!doctype html><html>{{template "head" .}}<body class="font-body">
-<div id="theme-root" class="theme-scope min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-csrf-token="{{.CSRFToken}}" data-initial-theme="{{.Theme}}">
+<div id="theme-root" class="min-h-screen bg-[var(--bg-page)] text-[var(--text-primary)]" data-csrf-token="{{.CSRFToken}}" data-initial-theme="{{.Theme}}">
   <header class="sticky top-0 z-20 bg-[var(--bg-surface)] border-b border-[var(--border-default)]">
     <div class="max-w-5xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between gap-2">
       <a href="/vaults" class="flex items-center gap-2 shrink-0 min-w-0">
@@ -44,7 +44,7 @@
   <main class="max-w-5xl mx-auto px-4 sm:px-6 py-6">
     {{if .Error}}<div id="browse-error" class="mb-4 border border-red-300 bg-red-50 text-red-800 text-sm px-3 py-2 dark:border-red-800/60 dark:bg-red-900/30 dark:text-red-300">{{.Error}}</div>{{end}}
 
-      <div class="flex items-center justify-between mb-4">
+    <div class="flex items-center justify-between mb-4">
       <h1 class="font-heading text-xl font-semibold uppercase tracking-wide">Entries</h1>
       <div class="flex items-center gap-3">
         <span class="text-xs text-[var(--text-secondary)]">{{len .Entries}} entries</span>
@@ -89,9 +89,6 @@
           <div class="min-w-0 flex-1"><p class="font-medium text-sm truncate">{{.Title}}</p><p class="text-xs text-[var(--text-secondary)] truncate">{{.Username}}</p></div>
           <button type="button" data-action="copy-by-id" data-target-id="pw-{{.EntryID}}" class="p-1.5 text-[var(--text-muted)] hover:text-[#5980a6]" aria-label="Copy password">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><rect x="9" y="9" width="11" height="11" rx="1.5"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>
-          </button>
-          <button type="button" data-action="show-modal" data-target="trash-entry-{{.EntryID}}" class="p-1.5 text-[var(--text-muted)] hover:text-[#3c5771] dark:hover:text-accent-300" aria-label="Move {{.Title}} to trash">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4"><path d="M4 7h16"></path><path d="M10 11v6M14 11v6"></path><path d="M6 7l1 13h10l1-13"></path><path d="M9 7V4h6v3"></path></svg>
           </button>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="w-4 h-4 text-[var(--text-muted)] transition-transform group-open:rotate-180"><path d="M6 9l6 6 6-6"></path></svg>
         </summary>
@@ -139,17 +136,6 @@
           </form>
         </div>
       </details>
-      <dialog id="trash-entry-{{.EntryID}}" class="relative border border-[var(--border-default)] p-6 max-w-sm w-[calc(100%-2rem)] [&::backdrop]:bg-[#1d1f20]/50">
-        {{template "corner-marks" $}}
-        <h3 class="font-heading text-base font-semibold uppercase tracking-wide">Move entry to trash?</h3>
-        <p class="mt-1 text-sm text-[var(--text-secondary)]">You can restore this entry for 30 days. Its contents stay hidden while it is in trash.</p>
-        <form method="post" action="/vaults/entries/delete" enctype="multipart/form-data" class="mt-4 space-y-3">
-          <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="entry_id" value="{{.EntryID}}">
-          <div><label class="block text-xs font-medium text-[var(--text-label)] uppercase tracking-wide">Master password</label><input type="password" name="master_password" required autocomplete="current-password" class="mt-1 w-full border border-[var(--border-default)] px-3 py-2 text-sm"></div>
-          <div><label class="block text-xs font-medium text-[var(--text-label)] uppercase tracking-wide">Key file <span class="font-normal text-[var(--text-muted)]">(optional)</span></label><input type="file" name="key_file" class="mt-1 w-full text-sm"></div>
-          <div class="flex justify-end gap-2 pt-2"><button type="button" data-action="close-modal" class="border border-[var(--border-default)] px-4 py-2 text-xs font-heading uppercase tracking-wide hover:bg-[var(--bg-surface-hover)]">Cancel</button><button type="submit" class="bg-[#5980a6] hover:bg-[#4a6c8c] text-white px-4 py-2 text-xs font-heading uppercase tracking-wide">Move to trash</button></div>
-        </form>
-      </dialog>
       {{end}}
     </div>
     {{else}}

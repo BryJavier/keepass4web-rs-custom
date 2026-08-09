@@ -38,7 +38,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 WORKDIR /app
 
+# Required at runtime, not just build time: main.rs's `Config::from_file`
+# defaults to reading "config.yml" from the working directory and fails
+# startup entirely (silently — StartupFailure is logged with no detail, exit
+# code 0) if it's missing. RUST_PRIVATE_LISTEN and friends only ever *override*
+# fields already loaded from this file — they don't substitute for it.
 COPY --from=build /out-binary /app/private-service
+COPY backend-rust/config.yml /app/config.yml
 
 EXPOSE 9090
 USER 65532:65532
